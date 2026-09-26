@@ -257,7 +257,9 @@ fn set_awg_off(dir: &PathBuf) { let _ = std::fs::write(dir.join("awg_off"), crat
 /// его как локальные SOCKS/HTTP-прокси на тех же портах, что Xray. Прав администратора не нужно.
 async fn awg_conf(client: &reqwest::Client, token: &str) -> Result<String, String> {
     let r = client.post(format!("{}/api/app/awg/config", crate::BASE)).header("X-App-Token", token)
-        .json(&json!({"hwid": format!("ins-{}", crate::install_id())})).send().await
+        // caps awg31 (26.09): wireproxy-awg v1.0.18 умеет HeaderProtectionKey/RandomTrailers/DisableCookies - сервер не выдаст
+        // AWG с ними тем, кто не умеет
+        .json(&json!({"hwid": format!("ins-{}", crate::install_id()), "caps": ["awg31"]})).send().await
         .map_err(|_| "Сервер AmneziaWG недоступен".to_string())?;
     match r.status().as_u16() {
         200..=299 => {}
@@ -277,8 +279,10 @@ async fn awg_conf(client: &reqwest::Client, token: &str) -> Result<String, Strin
     t += &format!("DNS = {}\n", if dns.is_empty() { "1.1.1.1".to_string() } else { dns.join(", ") });
     t += &format!("MTU = {}\n", c["mtu"].as_u64().unwrap_or(1280));
     if let Some(a) = c["awg"].as_object() {
-        for k in ["Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4", "I1", "I2", "I3", "I4", "I5"] {
-            let v = match a.get(k) { Some(Value::String(x)) => x.clone(), Some(Value::Number(n)) => n.to_string(), _ => continue };
+        for k in ["Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4", "I1", "I2", "I3", "I4", "I5",
+                  "HeaderProtectionKey", "RandomTrailers", "DisableCookies"] {   // последние три - AmneziaWG 3.1 (26.09)
+            let v = match a.get(k) { Some(Value::String(x)) => x.clone(), Some(Value::Number(n)) => n.to_string(),
+                                     Some(Value::Bool(b)) => b.to_string(), _ => continue };
             if !v.is_empty() { t += &format!("{k} = {v}\n"); }
         }
     }
