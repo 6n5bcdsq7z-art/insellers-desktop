@@ -58,7 +58,7 @@ fn save_token(t: &str) -> (bool, bool) {
     (kr, file)
 }
 
-/// Гостевой доступ на 5 минут (зайти в Telegram и войти): ссылку выдаёт сервер (POST /api/app/guest — делает страница),
+/// VPN до входа (ограниченный режим - только Telegram, чтобы зайти в Telegram и войти): ссылку выдаёт сервер (POST /api/app/guest — делает страница),
 /// здесь только храним её со сроком (мс по часам этого компьютера) и проверяем.
 const GUEST_PREFIX: &str = "https://direct.insellers.su/vpn/";
 const GUEST_MAX_MS: u64 = 15 * 60_000;

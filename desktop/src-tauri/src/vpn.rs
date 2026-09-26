@@ -220,7 +220,7 @@ fn cur_gen(app: &AppHandle) -> u32 {
     app.try_state::<VpnState>().map(|s| s.guest_gen.load(std::sync::atomic::Ordering::SeqCst)).unwrap_or(0)
 }
 
-const GUEST_END_MSG: &str = "Гостевые 5 минут закончились. 30 минут за ролик, +3 дня за друга или подписка - в приложении";
+const GUEST_END_MSG: &str = "Бесплатный VPN до входа закончился - войдите через Telegram. Полный интернет: 30 минут за ролик, +3 дня за друга или подписка";
 
 /// По окончании гостевых минут: есть вход и подписка — переключаемся на неё, иначе отключаемся.
 fn arm_guest_timer(app: &AppHandle, until: u64) {
@@ -859,7 +859,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     // 26.09: последняя рабочая конфигурация. Если наш сервер напрямую недоступен (сеть режет vpn.insellers.su или Мак
     // ещё не отошёл после закрытия другого VPN) - подключаемся по ней, а не пишем «Нет связи с сервером», пока Happ работает.
     let last = dir.join("config.last.json");
-    // 1) ссылка на свою подписку (или гостевая на 5 минут — вошёл, а подписки ещё нет)
+    // 1) ссылка на свою подписку (или гостевая - ограниченный режим до входа / пока подписки нет)
     let (url, until) = if !token.is_empty() {
         match sub_url(&client, &token).await {
             Ok(u) => (u, 0u64),
