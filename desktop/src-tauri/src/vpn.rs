@@ -681,6 +681,21 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
         }
     });
 
+    // 5б) замеры связи для центра диагностики (26.09): через 2 мин и раз в час, мимо туннеля, пока живо это подключение
+    let pr = app.clone();
+    tauri::async_runtime::spawn(async move {
+        crate::tokio_sleep(120).await;
+        loop {
+            if cur_gen(&pr) != watch_gen || !wanted(&pr) { break; }
+            if let Ok(d) = data_dir(&pr) {
+                if crate::probe::due(&d) {
+                    if let Ok(c) = http() { crate::probe::run_once(c, crate::load_token()).await; }
+                }
+            }
+            crate::tokio_sleep(300).await;
+        }
+    });
+
     // 6) честный статус: раз в 30 с проверяем, что через VPN реально открывается внешний сайт. Раньше
     // приложение писало «Защищено», даже когда трафик не шёл. Нет ответа 2 раза — «восстанавливаем»,
     // на 3-й — полный перезапуск со свежей конфигурацией с сервера.
