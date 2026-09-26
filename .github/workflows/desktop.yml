@@ -164,6 +164,9 @@ jobs:
 
   publish:
     needs: build
+    # 26.09: Linux не обязателен - Mac и Windows публикуются, даже если упала только Linux-сборка (проверка ниже: без
+    # файлов Mac/Windows публикации нет). Итог «что не собралось» пишет ночной скрипт владельцу.
+    if: ${{ !cancelled() && needs.build.result != 'skipped' }}
     runs-on: ubuntu-latest
     concurrency: { group: desktop-publish, cancel-in-progress: false }   # публикации строго по очереди
     timeout-minutes: 45
@@ -188,13 +191,15 @@ jobs:
               -H "X-CI-Key: $KEY" "https://vpn.insellers.su/api/ci/desktop-upload?name=$dst&ver=$VER" 2>&1 | tee -a ../publish.log
             cat /tmp/resp.txt | tee -a ../publish.log; echo | tee -a ../publish.log
           }
-          WIN=$(ls *-setup.exe | head -1); MACTGZ=$(ls *.app.tar.gz | head -1); DMG=$(ls *.dmg | head -1)
-          APPIMG=$(ls *.AppImage | head -1); DEB=$(ls *.deb | head -1)
+          WIN=$(ls *-setup.exe 2>/dev/null | head -1); MACTGZ=$(ls *.app.tar.gz 2>/dev/null | head -1); DMG=$(ls *.dmg 2>/dev/null | head -1)
+          APPIMG=$(ls *.AppImage 2>/dev/null | head -1); DEB=$(ls *.deb 2>/dev/null | head -1)
+          [ -n "$WIN" ] && [ -n "$MACTGZ" ] && [ -n "$DMG" ] || { echo "нет сборки Mac или Windows - не публикуем" | tee -a ../publish.log; exit 1; }
+          [ -n "$APPIMG" ] || echo "Linux не собрался - публикуем Mac и Windows без него" | tee -a ../publish.log
           up "$WIN" "INSELLERS-VPN-setup.exe" > ../up1.log 2>&1 &
           up "$DMG" "INSELLERS-VPN.dmg" > ../up2.log 2>&1 &
           up "$MACTGZ" "INSELLERS-VPN-mac.app.tar.gz" > ../up3.log 2>&1 &
-          up "$APPIMG" "INSELLERS-VPN.AppImage" > ../up4.log 2>&1 &
-          up "$DEB" "INSELLERS-VPN.deb" > ../up5.log 2>&1 &
+          [ -n "$APPIMG" ] && { up "$APPIMG" "INSELLERS-VPN.AppImage" > ../up4.log 2>&1 & }
+          [ -n "$DEB" ] && { up "$DEB" "INSELLERS-VPN.deb" > ../up5.log 2>&1 & }
           fail=0; for j in $(jobs -p); do wait $j || fail=1; done
           cat ../up*.log >> ../publish.log || true
           [ $fail = 0 ] || { echo "upload failed"; exit 1; }
@@ -210,9 +215,10 @@ jobs:
             "platforms": {
               "windows-x86_64": {"signature": sig("$WIN.sig"), "url": base + "INSELLERS-VPN-setup.exe"},
               "darwin-aarch64": mac, "darwin-x86_64": mac,
-              "linux-x86_64": {"signature": sig("$APPIMG.sig"), "url": base + "INSELLERS-VPN.AppImage"},
             },
           }
+          if "$APPIMG":
+              latest["platforms"]["linux-x86_64"] = {"signature": sig("$APPIMG.sig"), "url": base + "INSELLERS-VPN.AppImage"}
           json.dump(latest, open("latest.json", "w"), ensure_ascii=False)
           PY
           curl -fsS --retry 3 -X POST --data-binary @latest.json -H "Content-Type: application/json" \
