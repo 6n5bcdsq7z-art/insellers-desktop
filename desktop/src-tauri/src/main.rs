@@ -133,10 +133,17 @@ pub fn remote_log(ev: &str, data: serde_json::Value) {
             "ctx": {"install": install_id(), "platform": format!("desktop-{os}-native"), "version": env!("CARGO_PKG_VERSION")},
             "events": [{"ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0), "ev": ev, "data": data}]
         });
-        if let Ok(c) = reqwest::Client::builder().timeout(Duration::from_secs(10)).build() {
-            let mut rq = c.post(format!("{BASE}/api/app/log")).json(&body);
-            let t = load_token(); if !t.is_empty() { rq = rq.header("X-App-Token", t); }
-            let _ = rq.send().await;
+        // 26.09: сначала мимо системного прокси (= нашего туннеля): событие «путь умер» через мёртвый путь не дошло бы,
+        // и сервер видит IP провайдера, а не нашего сервера. Не вышло напрямую - через системный прокси.
+        let t = load_token();
+        for direct in [true, false] {
+            let b = reqwest::Client::builder().timeout(Duration::from_secs(10));
+            let b = if direct { b.no_proxy() } else { b };
+            if let Ok(c) = b.build() {
+                let mut rq = c.post(format!("{BASE}/api/app/log")).json(&body);
+                if !t.is_empty() { rq = rq.header("X-App-Token", t.clone()); }
+                if rq.send().await.map(|r| r.status().is_success()).unwrap_or(false) { break; }
+            }
         }
     });
 }

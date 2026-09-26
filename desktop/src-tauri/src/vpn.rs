@@ -193,6 +193,9 @@ pub fn cleanup_stale() {
 // («Порт 10808 уже занят другим процессом»). Берём свои редкие порты.
 const SOCKS_PORT: u16 = 38808;
 const HTTP_PORT: u16 = 38809;
+/// 26.09: вход только для проверки пути реальной загрузкой (правило маршрута ведёт его строго в путь, см. add_probe_rule)
+const PROBE_PORT: u16 = 38810;
+const PROBE_URL: &str = "https://vpn.insellers.su/probe/";
 
 #[derive(Default)]
 pub struct VpnState {
@@ -309,9 +312,9 @@ fn is_proxy(o: &Value) -> bool {
 
 fn net_of(o: &Value) -> String { o.pointer("/streamSettings/network").and_then(|v| v.as_str()).unwrap_or("").to_lowercase() }
 
-/// ОДИН путь, как у Happ (2026-09-24). Автовыбор leastLoad почти всегда уводил на XHTTP, а тот открывает
-/// сотни соединений в минуту к одному адресу — оператор это душит, сайты «не грузятся». Теперь:
-/// «Стабильный» → XHTTP, «Для Wi-Fi» → hy2, остальное → Reality; балансировщик и проверки путей убираем.
+/// Конфигурация по выбору человека. «Автовыбор» - как отдал сервер (несколько путей, проверки observatory реальной
+/// загрузкой 32 КБ, leastLoad; порядок - центр диагностики для провайдера). Явный протокол («Быстрый» → Reality,
+/// «Стабильный» → XHTTP, «Для Wi-Fi» → hy2) - один путь без балансировщика.
 fn pick_config(raw: Value, choice: &str) -> Value {
     let list: Vec<Value> = match raw { Value::Array(a) => a, v => vec![v] };
     if list.is_empty() { return Value::Null; }
@@ -448,6 +451,70 @@ fn is_bad(tag: &str) -> bool {
 }
 fn set_cur_path(tag: &str) { *CUR_PATH.lock().unwrap() = tag.to_string(); }
 fn cur_path() -> String { CUR_PATH.lock().unwrap().clone() }
+static CUR_DESC: Mutex<String> = Mutex::new(String::new());
+fn set_cur_desc(d: &str) { *CUR_DESC.lock().unwrap() = d.to_string(); }
+fn cur_desc() -> String { CUR_DESC.lock().unwrap().clone() }
+fn manual_choice(choice: &str) -> bool { choice == "reality" || choice == "xhttp" || choice == "hysteria2" }
+
+/// Описание пути для центра диагностики: вид@адрес (xhttp@212.34.151.212); у балансировщика - "auto".
+fn path_desc(c: &Value) -> String {
+    let t = path_tag(c);
+    if t == "auto" { return t; }
+    let o = match c["outbounds"].as_array().and_then(|a| a.iter().find(|o| o["tag"].as_str() == Some(t.as_str()))) { Some(o) => o, None => return t };
+    let kind = if is_hy(o) { "hy2" } else { match net_of(o).as_str() { "xhttp" => "xhttp", "grpc" => "grpc", _ => "reality" } };
+    let addr = o.pointer("/settings/vnext/0/address").or_else(|| o.pointer("/settings/servers/0/address"))
+        .or_else(|| o.pointer("/settings/address")).and_then(|v| v.as_str()).unwrap_or("");
+    format!("{kind}@{addr}")
+}
+
+/// Проверка идёт строго через путь: vpn.insellers.su = IP сервера NL-1, а IP серверов идут напрямую (иначе петля) -
+/// без этого правила проверка уходила бы мимо туннеля и «проходила» на мёртвом пути.
+fn add_probe_rule(cfg: &mut Value) {
+    let bal = cfg.pointer("/routing/balancers/0/tag").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let main = if bal.is_empty() { path_tag(cfg) } else { String::new() };
+    if bal.is_empty() && main.is_empty() { return; }
+    if cfg["routing"]["rules"].as_array().map(|a| a.iter().any(|r| r["inboundTag"] == json!(["probe-in"]))).unwrap_or(false) { return; }
+    let rule = if !bal.is_empty() { json!({"type": "field", "inboundTag": ["probe-in"], "balancerTag": bal}) }
+               else { json!({"type": "field", "inboundTag": ["probe-in"], "outboundTag": main}) };
+    if !cfg["routing"].is_object() { cfg["routing"] = json!({}); }
+    let old = cfg["routing"]["rules"].as_array().cloned().unwrap_or_default();
+    let mut rules = vec![rule];
+    rules.extend(old);
+    cfg["routing"]["rules"] = Value::Array(rules);
+}
+
+/// Скачать `size` (256k | 32k) с нашего сервера ЧЕРЕЗ путь (вход probe-in): (ok, байт, мс, причина отказа:
+/// core - ядро не слушает, timeout, short - оборвалось на середине = заморозка оператором, http <код>, io). До ~15 с.
+async fn probe_real(size: &str) -> (bool, u64, u64, String) {
+    let want: u64 = if size == "32k" { 32_768 } else { 262_144 };
+    let t0 = std::time::Instant::now();
+    let ms = |t: std::time::Instant| t.elapsed().as_millis() as u64;
+    let client = match reqwest::Proxy::all(format!("http://127.0.0.1:{PROBE_PORT}"))
+        .and_then(|p| reqwest::Client::builder().proxy(p).timeout(Duration::from_secs(15)).build()) {
+        Ok(c) => c, Err(_) => return (false, 0, 0, "io".into()),
+    };
+    let url = format!("{PROBE_URL}{size}?r={}", crate::now_ms());
+    let mut resp = match client.get(&url).header("Cache-Control", "no-cache").send().await {
+        Ok(r) => r,
+        Err(e) => {
+            let why = if e.is_connect() && t0.elapsed() < Duration::from_millis(500) { "core" } else if e.is_timeout() { "timeout" } else { "io" };
+            return (false, 0, ms(t0), why.into());
+        }
+    };
+    let code = resp.status().as_u16();
+    if code != 200 { return (false, 0, ms(t0), format!("http {code}")); }
+    let mut got: u64 = 0;
+    loop {
+        match resp.chunk().await {
+            Ok(Some(b)) => { got += b.len() as u64; if got >= want { break; } }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    if got >= want { (true, got, ms(t0), String::new()) }
+    else { (false, got, ms(t0), if got > 0 { "short".into() } else { "timeout".into() }) }
+}
+fn kbps(bytes: u64, ms: u64) -> u64 { if ms == 0 { 0 } else { bytes * 1000 / ms / 1024 } }
 
 /// Метка пути конфигурации: «auto» - если в ней балансировщик, иначе тег первого выхода-прокси.
 fn path_tag(c: &Value) -> String {
@@ -498,7 +565,8 @@ async fn xray_candidates(app: &AppHandle, client: &reqwest::Client, url: &str, o
         // hy2 (UDP) первым - только если человек сам выбрал «Для Wi-Fi»
         raw_cands.push(pick_config(raw, choice));
         let mut hys = Vec::new();
-        for c in &list {
+        // ручной выбор протокола - только он (26.09, владелец: при ручном выборе сами не переключаем, только сообщаем)
+        for c in if manual_choice(choice) { &list[..0] } else { &list[..] } {
             for o in c["outbounds"].as_array().cloned().unwrap_or_default() {
                 if is_proxy(&o) { raw_cands.push(single_from(c, &o)); } else if is_hy(&o) { hys.push(single_from(c, &o)); }
             }
@@ -521,6 +589,8 @@ async fn xray_candidates(app: &AppHandle, client: &reqwest::Client, url: &str, o
             cfg["log"] = json!({"loglevel": "warning"});
             if !geo { strip_geo_rules(&mut cfg); }
         }
+        if prepared { cfg["inbounds"] = local_inbounds(); }   // config.last.json прежних версий - без входа проверки
+        add_probe_rule(&mut cfg);
         out.push((tag, cfg));
     }
     if out.is_empty() { return Err("Сервер ещё не отдаёт конфигурацию для приложения".into()); }
@@ -670,7 +740,8 @@ fn local_inbounds() -> Value {
         {"tag": "socks-in", "listen": "127.0.0.1", "port": SOCKS_PORT, "protocol": "socks",
          "settings": {"udp": true}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]}},
         {"tag": "http-in", "listen": "127.0.0.1", "port": HTTP_PORT, "protocol": "http",
-         "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}}
+         "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}},
+        {"tag": "probe-in", "listen": "127.0.0.1", "port": PROBE_PORT, "protocol": "http"}
     ])
 }
 
@@ -798,6 +869,8 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
         let path = dir.join("config.json");
         let total = cands.len();
         let mut ok_cfg: Option<Vec<u8>> = None;
+        let mut soft: Option<(usize, String, String, Vec<u8>)> = None;   // прошёл 204, но не загрузку
+        let n_cands = cands.len();
         for (i, (tag, cfg)) in cands.into_iter().enumerate() {
             if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
             if i > 0 { notify(&app, "connecting", &format!("Путь не отвечает - пробуем другой ({}/{})…", i + 1, total)); }
@@ -805,18 +878,42 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
             std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
             launch(&app, "xray", vec!["run".into(), "-c".into(), path.to_string_lossy().to_string()], &dir)?;
             if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
+            let desc = path_desc(&cfg);
             if link_ok().await {
-                crate::remote_log("vpn.path_ok", json!({"path": tag, "try": i + 1}));
-                set_cur_path(&tag);
-                ok_cfg = Some(bytes);
-                break;
+                // 26.09 этап 2: 204 проходит и по «замороженному» оператором пути (ТСПУ режет TCP после ~16-25 КБ) -
+                // проверяем ещё реальной загрузкой 32 КБ через этот путь
+                let (rok, rb, rms, why) = probe_real("32k").await;
+                if rok || why == "core" || why.starts_with("http ") {
+                    crate::remote_log("vpn.path_ok", json!({"path": tag, "desc": desc, "try": i + 1, "kbps": kbps(rb, rms), "how": "real32k"}));
+                    set_cur_path(&tag); set_cur_desc(&desc);
+                    ok_cfg = Some(bytes);
+                    break;
+                }
+                crate::remote_log("vpn.path_dead", json!({"path": tag, "desc": desc, "try": i + 1, "reason": why, "kb": rb / 1024, "ms": rms, "stage": "start"}));
+                if soft.is_none() { soft = Some((i, tag.clone(), desc.clone(), bytes.clone())); }
+            } else {
+                crate::remote_log("vpn.path_dead", json!({"path": tag, "desc": desc, "try": i + 1, "reason": "no204", "stage": "start"}));
             }
-            crate::remote_log("vpn.path_dead", json!({"path": tag, "try": i + 1}));
             mark_bad(&tag);
             kill_child(&app);
         }
+        // загрузку не прошёл ни один путь, а 204 прошёл - скорее сбой нашего сервера проверки, чем всех путей: подключаемся
+        // по первому такому (как до 26.09), не оставляем человека без связи
+        if ok_cfg.is_none() {
+            if let Some((i, tag, desc, bytes)) = soft {
+                if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
+                std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+                launch(&app, "xray", vec!["run".into(), "-c".into(), path.to_string_lossy().to_string()], &dir)?;
+                if link_ok().await {
+                    crate::remote_log("vpn.path_ok", json!({"path": tag, "desc": desc, "try": i + 1, "how": "204only", "of": n_cands}));
+                    set_cur_path(&tag); set_cur_desc(&desc);
+                    ok_cfg = Some(bytes);
+                } else { kill_child(&app); }
+            }
+        }
         match ok_cfg {
             Some(b) => { if !token.is_empty() { let _ = std::fs::write(&last, &b); } }   // запасная копия - только проверенная
+            None if manual_choice(&choice) => return Err("Выбранный протокол сейчас не пропускает трафик - включите «Автовыбор» в настройках".into()),
             None => return Err("Не удалось подключиться: ни один путь не пропускает трафик. Попробуйте другую сеть или напишите в поддержку".into()),
         }
     }
@@ -841,7 +938,12 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
         let mut told: Vec<String> = Vec::new();
         loop {
             tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_secs(5))).await.ok();
-            let running = w.try_state::<VpnState>().map(|s| s.child.lock().unwrap().is_some()).unwrap_or(false);
+            let is_running = |w: &AppHandle| w.try_state::<VpnState>().map(|s| s.child.lock().unwrap().is_some()).unwrap_or(false);
+            let mut running = is_running(&w);
+            if !running {   // горячая замена ядра (этап 3) - child пуст на миг: перепроверяем через 2 с
+                tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_secs(2))).await.ok();
+                running = is_running(&w);
+            }
             if !running || cur_gen(&w) != watch_gen { break; }   // отключились или это уже другое подключение
             let closed = tauri::async_runtime::spawn_blocking(enforce_exclusive).await.unwrap_or_default();
             if cur_gen(&w) != watch_gen || !wanted(&w) { break; }
@@ -876,10 +978,14 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
         }
     });
 
-    // 6) честный статус: раз в 30 с проверяем, что через VPN реально открывается внешний сайт. Раньше
-    // приложение писало «Защищено», даже когда трафик не шёл. Нет ответа 2 раза — «восстанавливаем»,
-    // на 3-й — полный перезапуск со свежей конфигурацией с сервера.
+    // 6) честный статус и проверка пути (26.09 этап 2). Раз в 30 с - дешёвый 204 через туннель (признак); раз в 150 с и
+    // сразу при отказе 204 - РЕАЛЬНАЯ загрузка 256 КБ с нашего сервера через путь (204 проходит и по «замороженному»
+    // оператором пути). Два отказа загрузки подряд при работающем интернете без VPN = путь мёртв: при «Автовыборе» -
+    // отметка на 30 мин и за 10-20 с переход на следующий (свежая конфигурация, порядок центра диагностики); при ручном
+    // выборе протокола - только сообщение человеку. Интернета нет вообще - только статус.
     let h = app.clone();
+    let h_choice = choice.clone();
+    let (h_url, h_dir, h_last) = (if offline { String::new() } else { url.clone() }, dir.clone(), last.clone());
     tauri::async_runtime::spawn(async move {
         let client = match reqwest::Proxy::all(format!("http://127.0.0.1:{HTTP_PORT}"))
             .and_then(|p| reqwest::Client::builder().proxy(p).timeout(Duration::from_secs(7)).build()) {
@@ -888,6 +994,9 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
         tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_secs(8))).await.ok();
         let mut fails = 0u32;
         let mut degraded = false;
+        let mut n = 0u32;
+        let mut last_ok_log = 0u64;
+        let mut manual_warned = 0u64;
         loop {
             if cur_gen(&h) != watch_gen || !wanted(&h) { break; }
             let mut ok = false;
@@ -898,10 +1007,67 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
                 }
             }
             if cur_gen(&h) != watch_gen || !wanted(&h) { break; }
-            mark(&h, if ok { 1 } else { 0 });
-            if ok {
+            n += 1;
+            // реальная загрузка (не для AmneziaWG: у wireproxy нет входа проверки)
+            let mut path_ok = ok;
+            let mut dead_why = String::from("no204");
+            let (mut got, mut took) = (0u64, 0u64);
+            if !is_awg && (!ok || n % 5 == 0) {
+                let (mut rok, mut rb, mut rms, mut why) = probe_real("256k").await;
+                if !rok && why != "core" && !why.starts_with("http ") {
+                    tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_millis(1500))).await.ok();
+                    (rok, rb, rms, why) = probe_real("256k").await;
+                }
+                if cur_gen(&h) != watch_gen || !wanted(&h) { break; }
+                got = rb; took = rms;
+                if why == "core" || why.starts_with("http ") { path_ok = ok; }   // вход проверки/наш сервер - не путь
+                else { path_ok = rok; dead_why = why; }
+                if rok && crate::now_ms().saturating_sub(last_ok_log) > 15 * 60 * 1000 {
+                    last_ok_log = crate::now_ms();
+                    crate::remote_log("vpn.path_ok", json!({"path": cur_path(), "desc": cur_desc(), "kbps": kbps(rb, rms), "ms": rms, "how": "real256k"}));
+                }
+            }
+            mark(&h, if path_ok { 1 } else { 0 });
+            if path_ok {
                 if degraded { degraded = false; notify(&h, "connected", "Соединение восстановлено"); }
                 fails = 0;
+                // этап 3: раз в 15 мин - не сменил ли сервер конфигурацию (центр диагностики - порядок путей для провайдера,
+                // серверы). Сменил - горячая замена ядра: системный прокси и порты те же, человек не переподключается.
+                if !is_awg && !h_url.is_empty() && n % 30 == 0 {
+                    let fresh = match http() {
+                        Ok(c) => xray_candidates(&h, &c, &h_url, false, &h_choice, &h_dir, &h_last).await.ok()
+                            .and_then(|v| v.into_iter().next()),
+                        Err(_) => None,
+                    };
+                    if let Some((tag, cfg)) = fresh {
+                        let bytes = serde_json::to_vec(&cfg).unwrap_or_default();
+                        let p = h_dir.join("config.json");
+                        let cur = std::fs::read(&p).unwrap_or_default();
+                        if !bytes.is_empty() && bytes != cur && cur_gen(&h) == watch_gen && wanted(&h) && std::fs::write(&p, &bytes).is_ok() {
+                            let from = cur_desc();
+                            let desc = path_desc(&cfg);
+                            kill_child(&h);
+                            let up = launch(&h, "xray", vec!["run".into(), "-c".into(), p.to_string_lossy().to_string()], &h_dir).is_ok();
+                            if up && link_ok().await {
+                                set_cur_path(&tag); set_cur_desc(&desc);
+                                let _ = std::fs::write(&h_last, &bytes);
+                                crate::remote_log("vpn.path_order", json!({"from": from, "to": desc}));
+                            } else {
+                                // новая не поднялась - полное переподключение (оно же вернёт рабочий путь)
+                                let b = h.clone();
+                                std::thread::spawn(move || {
+                                    if !wanted(&b) { return; }
+                                    match tauri::async_runtime::block_on(start(b.clone())) {
+                                        Ok(()) => notify(&b, "connected", "Соединение восстановлено"),
+                                        Err(e) if e == "CANCELLED" || e == "BUSY" => {}
+                                        Err(e) => { if !crate::pref("killswitch") && wanted(&b) { set_proxy(false); } if wanted(&b) { notify(&b, "error", &e); } }
+                                    }
+                                });
+                                break;
+                            }
+                        }
+                    }
+                }
             } else {
                 fails += 1;
                 // AmneziaWG: ключ получен, а трафика нет 2 проверки подряд - уходим на Xray и 6 часов AWG здесь не пробуем
@@ -921,26 +1087,40 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
                     });
                     break;
                 }
-                if fails >= 3 && !is_awg && direct_ok().await {
-                    // интернет без VPN есть, а через путь - нет: путь умер (оператор начал резать) - уходим на следующий
+                // реальная загрузка не прошла дважды (или 204 - трижды), а интернет без VPN есть: путь умер
+                let real_dead = !is_awg && dead_why != "no204";
+                if (real_dead || (!is_awg && fails >= 3)) && direct_ok().await {
                     let dead = cur_path();
-                    mark_bad(&dead);
-                    crate::remote_log("vpn.path_switch", json!({"from": dead, "fails": fails}));
-                    notify(&h, "connecting", "Путь перестал отвечать - переключаемся на другой…");
-                    let b = h.clone();
-                    std::thread::spawn(move || {
-                        if !wanted(&b) { return; }
-                        match tauri::async_runtime::block_on(start(b.clone())) {
-                            Ok(()) => notify(&b, "connected", "Соединение восстановлено"),
-                            Err(e) if e == "CANCELLED" || e == "BUSY" => {}
-                            Err(e) => { if !crate::pref("killswitch") && wanted(&b) { set_proxy(false); } if wanted(&b) { notify(&b, "error", &e); } }
+                    let dead_desc = cur_desc();
+                    crate::remote_log("vpn.path_dead", json!({"path": dead, "desc": dead_desc, "reason": dead_why, "kb": got / 1024,
+                        "ms": took, "kbps": kbps(got, took), "manual": manual_choice(&h_choice)}));
+                    if manual_choice(&h_choice) {
+                        if crate::now_ms().saturating_sub(manual_warned) > 30 * 60 * 1000 {
+                            manual_warned = crate::now_ms();
+                            degraded = true; mark(&h, 2);
+                            notify(&h, "degraded", "Выбранный протокол сейчас не пропускает трафик - включите «Автовыбор» в настройках");
                         }
-                    });
-                    break;
+                    } else {
+                        mark_bad(&dead);
+                        notify(&h, "connecting", "Путь перестал отвечать - переключаемся на другой…");
+                        let b = h.clone();
+                        let t_fail = crate::now_ms();
+                        std::thread::spawn(move || {
+                            if !wanted(&b) { return; }
+                            match tauri::async_runtime::block_on(start(b.clone())) {
+                                Ok(()) => {
+                                    crate::remote_log("vpn.path_switch", json!({"from": dead, "from_desc": dead_desc, "to": cur_path(),
+                                        "to_desc": cur_desc(), "secs": crate::now_ms().saturating_sub(t_fail) / 1000}));
+                                    notify(&b, "connected", "Соединение восстановлено");
+                                }
+                                Err(e) if e == "CANCELLED" || e == "BUSY" => {}
+                                Err(e) => { if !crate::pref("killswitch") && wanted(&b) { set_proxy(false); } if wanted(&b) { notify(&b, "error", &e); } }
+                            }
+                        });
+                        break;
+                    }
                 }
-                if fails >= 3 && !degraded { degraded = true; mark(&h, 2); notify(&h, "degraded", "Нет ответа от сервера — восстанавливаем соединение"); }
-                // 2026-09-24 ХОТФИКС: без автоматического перезапуска — при ложной тревоге он рвал рабочее
-                // подключение (стоп → системный прокси снят). Только честный статус на экране.
+                if fails >= 3 && !degraded { degraded = true; mark(&h, 2); notify(&h, "degraded", "Нет ответа от сервера - восстанавливаем соединение"); }
             }
             let secs = if fails > 0 { 5 } else { 30 };
             tauri::async_runtime::spawn_blocking(move || std::thread::sleep(Duration::from_secs(secs))).await.ok();
