@@ -28,6 +28,8 @@ pub fn kill_other_vpns() -> (Vec<String>, Vec<String>) {
         if pid.as_u32() == me { continue; }
         let name = p.name().to_string_lossy().to_lowercase();
         if name.contains("insellers") { continue; }
+        // наш TUN (26.09): sing-box помощника работает от root из его папки - exe у root-процесса часто не виден, узнаём по имени
+        if (name == "sing-box" || name == "sing-box.exe" || name.starts_with("ins-helper")) && crate::tun::installed() { continue; }
         // наш собственный Xray (sidecar) лежит рядом с приложением — его не трогаем
         if let (Some(exe), Some(dir)) = (p.exe(), own_dir.as_ref()) { if exe.starts_with(dir) { continue; } }
         if let Some((_, title)) = OTHER_VPN.iter().find(|(k, _)| name.contains(k)) {
@@ -621,7 +623,7 @@ fn launch(app: &AppHandle, bin: &str, run_args: Vec<String>, dir: &PathBuf) -> R
                 if !mine { break; }
                 if !wanted(&a) { break; }   // ещё проверяем путь или уже отключились - решает start()
                 let ks = crate::pref("killswitch");
-                if !ks { set_proxy(false); }   // Kill Switch: прокси остаётся на мёртвом порту - интернет на паузе
+                if !ks { crate::tun::down(); set_proxy(false); }   // Kill Switch: прокси остаётся на мёртвом порту - интернет на паузе
                 if crate::pref("reconnect") {
                     let n = a.state::<VpnState>().retries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     notify(&a, "connecting", if ks { "Соединение прервано - интернет на паузе, переподключаемся…" } else { "Соединение прервано - переподключаемся…" });
@@ -668,6 +670,9 @@ async fn link_ok() -> bool {
 }
 /// Есть ли интернет вообще, без VPN (чтобы не менять путь, когда пропала сама сеть).
 async fn direct_ok() -> bool {
+    if crate::tun::active() {
+        return tauri::async_runtime::spawn_blocking(crate::tun::net_ok_stored).await.unwrap_or(false);
+    }
     let client = match reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build() { Ok(c) => c, Err(_) => return false };
     for u in ["http://connectivitycheck.gstatic.com/generate_204", "http://ya.ru/"] {
         if let Ok(r) = client.get(u).send().await { if r.status().as_u16() < 500 { return true; } }
@@ -779,6 +784,7 @@ pub fn notify_code(app: &AppHandle, state: &str, msg: &str, code: &str) {
 pub fn stop(app: &AppHandle) {
     set_wanted(app, false);   // любая остановка из приложения — не переподключаемся
     bump_gen(app);            // незаконченный запуск, сторож и гостевой таймер старого подключения больше не действуют
+    crate::tun::down();       // TUN (26.09): весь трафик системы снова идёт как без VPN
     set_proxy(false);
     if let Some(st) = app.try_state::<VpnState>() {
         let child = st.child.lock().unwrap().take();
@@ -919,12 +925,40 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
     }
     if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
 
-    // 4) путь проверен - включаем системный прокси и убеждаемся, что он встал на сеть
-    set_proxy(true);
-    if !proxy_is_ours() { std::thread::sleep(Duration::from_millis(300)); set_proxy(true); }
-    if !proxy_is_ours() {
-        crate::remote_log("vpn.proxy_not_applied", json!({}));
-        if !proxy_left_on() { kill_child(&app); return Err("Не удалось включить VPN для этой сети. Переподключите Wi-Fi или перезапустите приложение".into()); }
+    // 4) путь проверен. 26.09 (владелец): весь трафик системы - через TUN (ssh, терминал, любые программы), как у Happ.
+    // Помощника нет - ставим (один раз, пароль администратора / UAC); отказ или сбой - системный прокси, как раньше.
+    let mut tun_on = false;
+    if crate::tun::supported() && !crate::pref("tun_off") {
+        let cfg_text = if is_awg { std::fs::read_to_string(dir.join("awg.conf")).unwrap_or_default() }
+                       else { std::fs::read_to_string(dir.join("config.json")).unwrap_or_default() };
+        let bypass = crate::tun::bypass_ips(&cfg_text);
+        let dns = if is_awg { "tcp" } else { "udp" };
+        let d2 = dir.clone();
+        let r = tauri::async_runtime::spawn_blocking(move || {
+            crate::tun::install(&d2)?;
+            crate::tun::up(SOCKS_PORT, &bypass, dns)
+        }).await.unwrap_or_else(|e| Err(e.to_string()));
+        if cur_gen(&app) != my_gen { crate::tun::down(); kill_child(&app); return Err("CANCELLED".into()); }
+        match r {
+            Ok(()) => {
+                // TUN встал - проверяем, что через него реально идёт трафик (запрос без прокси = через TUN)
+                let ok = match reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(6)).build() {
+                    Ok(c) => c.get("http://cp.cloudflare.com/generate_204").send().await.map(|r| r.status().as_u16() == 204).unwrap_or(false),
+                    Err(_) => false,
+                };
+                if ok { tun_on = true; crate::remote_log("vpn.tun_on", json!({"dns": dns})); }
+                else { crate::tun::down(); crate::remote_log("vpn.tun_fallback", json!({"reason": "нет трафика через TUN"})); }
+            }
+            Err(e) => crate::remote_log("vpn.tun_fallback", json!({"reason": e})),
+        }
+    }
+    if !tun_on {
+        set_proxy(true);
+        if !proxy_is_ours() { std::thread::sleep(Duration::from_millis(300)); set_proxy(true); }
+        if !proxy_is_ours() {
+            crate::remote_log("vpn.proxy_not_applied", json!({}));
+            if !proxy_left_on() { kill_child(&app); return Err("Не удалось включить VPN для этой сети. Переподключите Wi-Fi или перезапустите приложение".into()); }
+        }
     }
     set_wanted(&app, true);
     UP_AT.store(crate::now_ms(), std::sync::atomic::Ordering::SeqCst);
@@ -952,7 +986,15 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
                 told.extend(fresh.iter().cloned());
                 notify(&w, "connected", &format!("Закрыли {} — два VPN одновременно мешают друг другу", fresh.join(", ")));
             }
-            if !proxy_is_ours() {
+            if crate::tun::active() {
+                // «пульс» (помощник снимает TUN, если приложение молчит 60 с); TUN пропал (помощник снял) - переподключаемся
+                if !tauri::async_runtime::spawn_blocking(crate::tun::ping).await.unwrap_or(true) && wanted(&w) && cur_gen(&w) == watch_gen {
+                    crate::remote_log("vpn.tun_lost", json!({}));
+                    let b = w.clone();
+                    std::thread::spawn(move || { let _ = tauri::async_runtime::block_on(start(b)); });
+                    break;
+                }
+            } else if !proxy_is_ours() {
                 let (k, _) = kill_other_vpns();
                 if cur_gen(&w) != watch_gen || !wanted(&w) { break; }   // пока проверяли — нажали «Отключить»
                 set_proxy(true);

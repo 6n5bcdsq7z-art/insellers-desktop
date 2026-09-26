@@ -6,6 +6,7 @@
 
 mod vpn;
 mod probe;
+mod tun;
 
 use std::time::Duration;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};

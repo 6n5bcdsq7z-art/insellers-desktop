@@ -40,7 +40,9 @@
     },
     "externalBin": [
       "binaries/xray",
-      "binaries/wireproxy"
+      "binaries/wireproxy",
+      "binaries/ins-helper",
+      "binaries/sing-box"
     ],
     "linux": {
       "deb": {
