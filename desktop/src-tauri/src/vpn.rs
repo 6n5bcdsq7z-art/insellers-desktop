@@ -941,13 +941,27 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
         if cur_gen(&app) != my_gen { crate::tun::down(); kill_child(&app); return Err("CANCELLED".into()); }
         match r {
             Ok(()) => {
-                // TUN встал - проверяем, что через него реально идёт трафик (запрос без прокси = через TUN)
-                let ok = match reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(6)).build() {
-                    Ok(c) => c.get("http://cp.cloudflare.com/generate_204").send().await.map(|r| r.status().as_u16() == 204).unwrap_or(false),
-                    Err(_) => false,
-                };
+                // TUN встал - проверяем, что через него реально идёт трафик (запрос без прокси = через TUN). 26.09: на Mac
+                // сразу после включения помощник меняет DNS служб и перезапускает mDNSResponder - первая попытка падала
+                // (1.0.113 у владельца). Три попытки за ~15 с; причина провала - в журнал.
+                let mut ok = false;
+                let mut why = String::new();
+                if let Ok(c) = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build() {
+                    for i in 0..3u64 {
+                        tauri::async_runtime::spawn_blocking(move || std::thread::sleep(Duration::from_millis(1000 + 1500 * i))).await.ok();
+                        match c.get("http://cp.cloudflare.com/generate_204").send().await {
+                            Ok(r) if r.status().as_u16() == 204 => { ok = true; break; }
+                            Ok(r) => why = format!("ответ {}", r.status().as_u16()),
+                            Err(e) => why = format!("{}{}", if e.is_timeout() { "таймаут: " } else if e.is_connect() { "соединение: " } else { "" }, e),
+                        }
+                    }
+                }
                 if ok { tun_on = true; crate::remote_log("vpn.tun_on", json!({"dns": dns})); }
-                else { crate::tun::down(); crate::remote_log("vpn.tun_fallback", json!({"reason": "нет трафика через TUN"})); }
+                else {
+                    let st = tauri::async_runtime::spawn_blocking(crate::tun::status).await.unwrap_or_default();
+                    crate::tun::down();
+                    crate::remote_log("vpn.tun_fallback", json!({"reason": "нет трафика через TUN", "err": why, "helper": st}));
+                }
             }
             Err(e) => crate::remote_log("vpn.tun_fallback", json!({"reason": e})),
         }

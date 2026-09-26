@@ -168,6 +168,9 @@ pub fn down() {
     }
 }
 
+/// Состояние помощника для журнала (работает ли sing-box, последняя ошибка).
+pub fn status() -> Value { call(&json!({"cmd": "status"}), 3).unwrap_or(Value::Null) }
+
 fn helper_running() -> bool {
     call(&json!({"cmd": "status"}), 3).and_then(|v| v["running"].as_bool()).unwrap_or(false)
 }
