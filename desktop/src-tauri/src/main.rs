@@ -419,7 +419,7 @@ fn swap_token(app: &AppHandle, token: &str) {
 async fn vpn_connect(app: AppHandle) -> Result<(), String> {
     vpn::notify(&app, "connecting", "");
     match vpn::start(app.clone()).await {
-        Ok(()) => { remote_log("vpn.connected", serde_json::json!({})); vpn::notify(&app, "connected", ""); Ok(()) }
+        Ok(()) => { remote_log("vpn.connected", serde_json::json!({})); vpn::notify(&app, "connected", &vpn::take_connect_msg()); Ok(()) }
         Err(e) if e == "BUSY" => Err(e),   // подключение уже идёт — второй раз не запускаем
         Err(e) if e == "CANCELLED" => { vpn::notify(&app, "disconnected", ""); Err(e) }   // нажали «Отключить» во время подключения
         Err(e) => {

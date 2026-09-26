@@ -178,6 +178,9 @@ fn mark(app: &AppHandle, kind: u8) {
 }
 
 /// Один запуск подключения за раз: повторное нажатие / трей / автоподключение не плодят второй Xray.
+/// До какого времени (мс) ручной протокол заменён «Автовыбором» (ручной путь не пропускал трафик). 0 - не заменён.
+static TEMP_AUTO_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+fn manual_name(c: &str) -> &'static str { match c { "reality" => "Быстрый", "xhttp" => "Стабильный", "hysteria2" => "Для Wi-Fi", _ => "выбранный" } }
 static STARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 struct StartGuard;
 impl Drop for StartGuard { fn drop(&mut self) { STARTING.store(false, std::sync::atomic::Ordering::SeqCst); } }
@@ -811,7 +814,29 @@ pub fn stop(app: &AppHandle) {
     kill_own_xray(None);      // и «потерянные» Xray, если были
 }
 
+static CONNECT_MSG: Mutex<String> = Mutex::new(String::new());
+/// Сообщение последнего подключения (временный «Автовыбор» вместо ручного протокола) - один раз.
+pub fn take_connect_msg() -> String { std::mem::take(&mut *CONNECT_MSG.lock().unwrap()) }
+
 pub async fn start(app: AppHandle) -> Result<(), String> {
+    // 26.09 (владелец): ручной протокол не пропустил трафик при подключении - второй заход на временном «Автовыборе»
+    match start_once(app.clone()).await {
+        Err(e) if e.starts_with("RETRY_AUTO:") => {
+            let name = e.trim_start_matches("RETRY_AUTO:").to_string();
+            notify(&app, "connecting", "Выбранный протокол не пропускает трафик - подключаем через «Автовыбор»…");
+            let r = start_once(app.clone()).await;
+            if r.is_ok() {
+                let m = format!("Выбранный протокол («{name}») сейчас не работает в Вашей сети - временно подключили через «Автовыбор»");
+                *CONNECT_MSG.lock().unwrap() = m.clone();   // кнопка «Подключить» (main.rs) покажет его вместо пустого
+                notify(&app, "connected", &m);
+            }
+            r
+        }
+        r => r,
+    }
+}
+
+async fn start_once(app: AppHandle) -> Result<(), String> {
     if STARTING.swap(true, std::sync::atomic::Ordering::SeqCst) { return Err("BUSY".into()); }
     let _guard = StartGuard;
     stop(&app);
@@ -854,6 +879,12 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
         crate::remote_log("vpn.cached_config", json!({}));
     }
     let choice = if token.is_empty() || offline { String::new() } else { transport_choice(&client, &token).await };
+    // 26.09 (владелец): ручной протокол не пропускал трафик - ВРЕМЕННО «Автовыбор» (сервер по ?auto=1 отдаёт все пути),
+    // выбор человека не трогаем; через 15 мин снова пробуем его (проверка пути ниже переподключит)
+    let temp_auto = manual_choice(&choice) && crate::now_ms() < TEMP_AUTO_UNTIL.load(std::sync::atomic::Ordering::SeqCst);
+    let (choice, url) = if temp_auto && !url.is_empty() {
+        (String::new(), format!("{}{}auto=1", url, if url.contains('?') { "&" } else { "?" }))
+    } else { (choice, url) };
     // Протокол выбирают на уровне аккаунта: «AmneziaWG» с телефона приходит и сюда. Не получили ключ AWG (нет доступа,
     // лимит, сервер AWG недоступен) - подключаемся через Xray как при «Автовыборе», а не отказываем (26.09: раньше Мак
     // переставал подключаться из-за выбора на телефоне)
@@ -937,6 +968,12 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
         }
         match ok_cfg {
             Some(b) => { if !token.is_empty() { let _ = std::fs::write(&last, &b); } }   // запасная копия - только проверенная
+            // 26.09 (владелец): ручной протокол не пропускает - временно «Автовыбор» (15 мин), выбор человека не трогаем
+            None if manual_choice(&choice) && !url.is_empty() => {
+                TEMP_AUTO_UNTIL.store(crate::now_ms() + 15 * 60 * 1000, std::sync::atomic::Ordering::SeqCst);
+                crate::remote_log("vpn.manual_fallback", json!({"manual": manual_name(&choice), "at": "connect"}));
+                return Err(format!("RETRY_AUTO:{}", manual_name(&choice)));
+            }
             None if manual_choice(&choice) => return Err("Выбранный протокол сейчас не пропускает трафик - включите «Автовыбор» в настройках".into()),
             None => return Err("Не удалось подключиться: ни один путь не пропускает трафик. Попробуйте другую сеть или напишите в поддержку".into()),
         }
@@ -1077,6 +1114,7 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
     // выборе протокола - только сообщение человеку. Интернета нет вообще - только статус.
     let h = app.clone();
     let h_choice = choice.clone();
+    let h_temp_auto = temp_auto;
     let (h_url, h_dir, h_last) = (if offline { String::new() } else { url.clone() }, dir.clone(), last.clone());
     tauri::async_runtime::spawn(async move {
         let client = match reqwest::Proxy::all(format!("http://127.0.0.1:{HTTP_PORT}"))
@@ -1123,6 +1161,21 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
             if path_ok {
                 if degraded { degraded = false; notify(&h, "connected", "Соединение восстановлено"); }
                 fails = 0;
+                // временный «Автовыбор» вместо ручного протокола истёк - переподключаемся на выбор человека (не пройдёт
+                // проверку - снова «Автовыбор» ещё на 15 мин)
+                if h_temp_auto && crate::now_ms() >= TEMP_AUTO_UNTIL.load(std::sync::atomic::Ordering::SeqCst) {
+                    crate::remote_log("vpn.manual_back", json!({}));
+                    let b = h.clone();
+                    std::thread::spawn(move || {
+                        if !wanted(&b) { return; }
+                        match tauri::async_runtime::block_on(start(b.clone())) {
+                            Ok(()) => {}
+                            Err(e) if e == "CANCELLED" || e == "BUSY" => {}
+                            Err(e) => { if !crate::pref("killswitch") && wanted(&b) { set_proxy(false); } if wanted(&b) { notify(&b, "error", &e); } }
+                        }
+                    });
+                    break;
+                }
                 // этап 3: раз в 15 мин - не сменил ли сервер конфигурацию (центр диагностики - порядок путей для провайдера,
                 // серверы). Сменил - горячая замена ядра: системный прокси и порты те же, человек не переподключается.
                 if !is_awg && !h_url.is_empty() && n % 30 == 0 {
@@ -1186,7 +1239,23 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
                     let dead_desc = cur_desc();
                     crate::remote_log("vpn.path_dead", json!({"path": dead, "desc": dead_desc, "reason": dead_why, "kb": got / 1024,
                         "ms": took, "kbps": kbps(got, took), "manual": manual_choice(&h_choice)}));
-                    if manual_choice(&h_choice) {
+                    if manual_choice(&h_choice) && !h_url.is_empty() {
+                        // 26.09 (владелец): ручной протокол не пропускает трафик - временно «Автовыбор» на 15 мин
+                        TEMP_AUTO_UNTIL.store(crate::now_ms() + 15 * 60 * 1000, std::sync::atomic::Ordering::SeqCst);
+                        let name = manual_name(&h_choice);
+                        crate::remote_log("vpn.manual_fallback", json!({"from": dead_desc, "manual": name}));
+                        notify(&h, "connecting", "Выбранный протокол не пропускает трафик - подключаем через «Автовыбор»…");
+                        let b = h.clone();
+                        std::thread::spawn(move || {
+                            if !wanted(&b) { return; }
+                            match tauri::async_runtime::block_on(start(b.clone())) {
+                                Ok(()) => notify(&b, "connected", &format!("Выбранный протокол («{name}») сейчас не работает в Вашей сети - временно подключили через «Автовыбор»")),
+                                Err(e) if e == "CANCELLED" || e == "BUSY" => {}
+                                Err(e) => { if !crate::pref("killswitch") && wanted(&b) { set_proxy(false); } if wanted(&b) { notify(&b, "error", &e); } }
+                            }
+                        });
+                        break;
+                    } else if manual_choice(&h_choice) {
                         if crate::now_ms().saturating_sub(manual_warned) > 30 * 60 * 1000 {
                             manual_warned = crate::now_ms();
                             degraded = true; mark(&h, 2);
