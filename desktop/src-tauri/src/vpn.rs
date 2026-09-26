@@ -212,7 +212,7 @@ fn cur_gen(app: &AppHandle) -> u32 {
     app.try_state::<VpnState>().map(|s| s.guest_gen.load(std::sync::atomic::Ordering::SeqCst)).unwrap_or(0)
 }
 
-const GUEST_END_MSG: &str = "Гостевые 5 минут закончились. Бесплатный час за рекламу, +3 дня за друга или подписка — в приложении";
+const GUEST_END_MSG: &str = "Гостевые 5 минут закончились. 30 минут за ролик, +3 дня за друга или подписка - в приложении";
 
 /// По окончании гостевых минут: есть вход и подписка — переключаемся на неё, иначе отключаемся.
 fn arm_guest_timer(app: &AppHandle, until: u64) {
