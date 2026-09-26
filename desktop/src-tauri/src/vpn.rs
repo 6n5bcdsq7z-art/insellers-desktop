@@ -180,7 +180,7 @@ fn mark(app: &AppHandle, kind: u8) {
 /// Один запуск подключения за раз: повторное нажатие / трей / автоподключение не плодят второй Xray.
 /// До какого времени (мс) ручной протокол заменён «Автовыбором» (ручной путь не пропускал трафик). 0 - не заменён.
 static TEMP_AUTO_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-fn manual_name(c: &str) -> &'static str { match c { "reality" => "Быстрый", "xhttp" => "Стабильный", "hysteria2" => "Для Wi-Fi", _ => "выбранный" } }
+fn manual_name(c: &str) -> &'static str { match c { "reality" => "Быстрый", "xhttp" => "Стабильный", "hysteria2" => "Для Wi-Fi", _ => "выбранная конфигурация" } }
 static STARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 struct StartGuard;
 impl Drop for StartGuard { fn drop(&mut self) { STARTING.store(false, std::sync::atomic::Ordering::SeqCst); } }
@@ -477,7 +477,7 @@ fn cur_path() -> String { CUR_PATH.lock().unwrap().clone() }
 static CUR_DESC: Mutex<String> = Mutex::new(String::new());
 fn set_cur_desc(d: &str) { *CUR_DESC.lock().unwrap() = d.to_string(); }
 fn cur_desc() -> String { CUR_DESC.lock().unwrap().clone() }
-fn manual_choice(choice: &str) -> bool { choice == "reality" || choice == "xhttp" || choice == "hysteria2" }
+fn manual_choice(choice: &str) -> bool { choice == "reality" || choice == "xhttp" || choice == "hysteria2" || choice.starts_with("cfg:") }
 
 /// Описание пути для центра диагностики: вид@адрес (xhttp@212.34.151.212); у балансировщика - "auto".
 fn path_desc(c: &Value) -> String {
