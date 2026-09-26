@@ -114,3 +114,111 @@ pub fn due(dir: &std::path::Path) -> bool {
     let _ = std::fs::write(&p, now.to_string());
     true
 }
+
+// ---- Часовой замер вариантов конфигурации (26.09 ночь, владелец) - как на Android (AppProbe.runVariants) ----
+// Сервер подписок отдаёт проверочную конфигурацию (?format=probe: 4 варианта «сервер|вид|режим|отпечаток|xmux|frag», каждый на
+// своём локальном HTTP-входе). Поднимаем ОТДЕЛЬНЫЙ Xray рядом с основным и меряем каждый вариант: первый запрос (рукопожатие),
+// второй (задержка), 128 КБ (скорость; обрыв после N КБ - признак ТСПУ). ~0.5 МБ за раунд, раз в every_h (1 ч).
+// Не мешаем человеку: не в энергосбережении, не на батарее < 30% (Мак), не пока он сам качает > 150 КБ/с - тогда позже.
+
+fn battery_low() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(o) = std::process::Command::new("pmset").args(["-g", "batt"]).output() {
+            let s = String::from_utf8_lossy(&o.stdout).to_string();
+            if s.contains("discharging") {
+                if let Some(p) = s.split('%').next().and_then(|a| a.rsplit(|c: char| !c.is_ascii_digit()).next()) {
+                    if let Ok(v) = p.parse::<u32>() { return v < 30; }
+                }
+            }
+        }
+    }
+    false
+}
+
+async fn user_busy() -> bool {
+    let mut nets = sysinfo::Networks::new_with_refreshed_list();
+    let _ = crate::upd::phys_rx(&mut nets);
+    crate::tokio_sleep(3).await;
+    crate::upd::phys_rx(&mut nets) / 3 > 150 * 1024
+}
+
+/// Пора ли (раз в every_h из плана; переподключения не учащают). Время ставим только когда замер реально пошёл.
+pub fn variants_due(dir: &std::path::Path) -> bool {
+    let rd = |n: &str| std::fs::read_to_string(dir.join(n)).ok().and_then(|t| t.trim().parse::<u64>().ok()).unwrap_or(0);
+    let (last, every) = (rd("vprobe_last"), rd("vprobe_every_h").clamp(1, 48));
+    let now = crate::now_ms();
+    last == 0 || now < last || now - last >= every * 3600_000
+}
+
+async fn get_via(port: u16, url: &str, max: usize, secs: u64) -> (u64, usize, String) {
+    let t0 = Instant::now();
+    let c = match reqwest::Client::builder().proxy(match reqwest::Proxy::all(format!("http://127.0.0.1:{port}")) { Ok(p) => p, Err(e) => return (0, 0, e.to_string()) })
+        .user_agent(format!("InsellersVPN/desktop-{} netcheck", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(secs)).build() { Ok(c) => c, Err(e) => return (0, 0, e.to_string()) };
+    let mut got = 0usize;
+    let err = match c.get(url).send().await {
+        Ok(mut r) => {
+            let st = r.status();
+            loop {
+                match r.chunk().await {
+                    Ok(Some(b)) => { got += b.len(); if got >= max { break String::new(); } }
+                    Ok(None) => break if st.is_success() { String::new() } else { format!("http {}", st.as_u16()) },
+                    Err(e) => break e.to_string().chars().take(120).collect(),
+                }
+            }
+        }
+        Err(e) => e.to_string().chars().take(120).collect(),
+    };
+    (t0.elapsed().as_millis() as u64, got, err)
+}
+
+pub async fn run_variants(app: &tauri::AppHandle, dir: &std::path::Path, token: String) {
+    use tauri_plugin_shell::ShellExt;
+    if token.is_empty() || low_power() || battery_low() || user_busy().await { return; }
+    let direct = match reqwest::Client::builder().no_proxy().user_agent(format!("InsellersVPN/desktop-{}", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(15)).build() { Ok(c) => c, Err(_) => return };
+    let sub = match crate::vpn::sub_url(&direct, &token).await { Ok(s) => s, Err(_) => return };
+    let base = sub.split('?').next().unwrap_or("").to_string();
+    let port: u16 = 20000 + (crate::now_ms() % 20000) as u16;
+    let plan: Value = match direct.get(format!("{base}?format=probe&port={port}&net=wifi")).send().await {
+        Ok(r) if r.status().is_success() => r.json().await.unwrap_or(Value::Null),
+        _ => return,
+    };
+    let vs = plan["variants"].as_array().cloned().unwrap_or_default();
+    if vs.is_empty() { return; }
+    let _ = std::fs::write(dir.join("vprobe_last"), crate::now_ms().to_string());
+    let _ = std::fs::write(dir.join("vprobe_every_h"), plan["every_h"].as_u64().unwrap_or(1).to_string());
+    let path = dir.join("probe-variants.json");
+    if std::fs::write(&path, plan["config"].to_string()).is_err() { return; }
+    let ps = path.to_string_lossy().to_string();
+    let (rx, child) = match app.shell().sidecar("xray").and_then(|c| c.args(["run", "-c", ps.as_str()]).spawn()) {
+        Ok(x) => x,
+        Err(_) => return,
+    };
+    crate::tokio_sleep(2).await;
+    let lat = plan["urls"]["latency"].as_str().unwrap_or("https://vpn.insellers.su/probe/204").to_string();
+    let big = plan["urls"]["big"].as_str().unwrap_or("https://vpn.insellers.su/probe/128k").to_string();
+    let want = if big.ends_with("/256k") { 262144 } else if big.ends_with("/32k") { 32768 } else { 131072 };
+    let mut out = Vec::new();
+    for v in vs {
+        let id = v["id"].as_str().unwrap_or("").to_string();
+        let p = v["port"].as_u64().unwrap_or(0) as u16;
+        let (hs, _, e1) = get_via(p, &lat, 1024, 10).await;
+        if !e1.is_empty() { out.push(json!({"id": id, "ok": false, "err": e1, "hs_ms": hs})); continue; }
+        let (rtt, _, _) = get_via(p, &lat, 1024, 10).await;
+        let (ms, got, e3) = get_via(p, &big, want, 15).await;
+        let ok = e3.is_empty() && got >= want;
+        let mut r = json!({"id": id, "ok": ok, "hs_ms": hs, "rtt_ms": rtt, "ms": ms, "kb": ((got as f64) / 102.4).round() / 10.0});
+        if ms > 0 { r["kbps"] = json!(got as f64 * 8.0 / ms as f64); }
+        if !ok { r["err"] = json!(if e3.is_empty() { format!("прочитано {} КБ из {}", got / 1024, want / 1024) } else { e3 }); }
+        out.push(r);
+    }
+    let _ = child.kill();
+    drop(rx);
+    let _ = std::fs::remove_file(&path);
+    let body = json!({"net": "", "device": format!("ins-{}", crate::install_id()), "platform": "desktop",
+                      "version": env!("CARGO_PKG_VERSION"), "results": out});
+    let _ = direct.post(format!("{}/api/app/variant-probe", crate::BASE)).header("X-App-Token", &token)
+        .json(&body).send().await;
+}

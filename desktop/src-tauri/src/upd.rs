@@ -34,7 +34,7 @@ fn client(via_tunnel: bool) -> Result<reqwest::Client, String> {
 }
 
 /// Сколько байт пришло по физическим интерфейсам (без loopback и туннелей) с прошлого вызова.
-fn phys_rx(nets: &mut sysinfo::Networks) -> u64 {
+pub(crate) fn phys_rx(nets: &mut sysinfo::Networks) -> u64 {
     nets.refresh();
     nets.iter().filter(|(n, _)| {
         let n = n.to_lowercase();

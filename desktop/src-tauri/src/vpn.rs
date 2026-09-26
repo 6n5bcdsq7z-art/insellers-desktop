@@ -435,7 +435,7 @@ fn fresh_last(p: &std::path::Path) -> bool {
 }
 
 /// Ссылка на подписку человека по токену входа.
-async fn sub_url(client: &reqwest::Client, token: &str) -> Result<String, String> {
+pub(crate) async fn sub_url(client: &reqwest::Client, token: &str) -> Result<String, String> {
     // 26.09: сразу после закрытия другого VPN (Happ в режиме TUN) сеть на Маке пару секунд «висит» - один запрос на 20 с
     // давал «Нет связи с сервером», хотя повтор через 6 с проходил за 2 с. Теперь 3 попытки по 8 с с паузой 2 с.
     let mut resp = None;
@@ -1124,6 +1124,10 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
             if let Ok(d) = data_dir(&pr) {
                 if crate::probe::due(&d) {
                     crate::probe::run_once(crate::load_token()).await;
+                }
+                // 26.09 ночь: замер вариантов конфигурации для диагностической машины (раз в час, ~0.5 МБ)
+                if crate::probe::variants_due(&d) {
+                    crate::probe::run_variants(&pr, &d, crate::load_token()).await;
                 }
             }
             crate::tokio_sleep(300).await;
