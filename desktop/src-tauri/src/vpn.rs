@@ -282,8 +282,8 @@ async fn awg_conf(client: &reqwest::Client, token: &str) -> Result<String, Strin
     match r.status().as_u16() {
         200..=299 => {}
         402 => return Err("Нет активной подписки".into()),
-        409 => return Err("Достигнут лимит устройств — отключите лишнее в «Устройствах»".into()),
-        _ => return Err("AmneziaWG сейчас недоступен — выберите другой протокол".into()),
+        409 => return Err("Достигнут лимит устройств - отключите лишнее в «Устройствах»".into()),
+        _ => return Err("AmneziaWG сейчас недоступен - выберите другой протокол".into()),
     }
     let v: Value = r.json().await.map_err(|_| "AmneziaWG: неверный ответ сервера".to_string())?;
     let c = &v["config"];
@@ -871,7 +871,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     for n in stop_other_ne_vpns() { if !killed.contains(&n) { killed.push(n); } }
     if !killed.is_empty() { notify(&app, "connecting", &format!("Отключаем другой VPN: {}…", killed.join(", "))); }
     if !failed.is_empty() {
-        return Err(format!("OTHER_VPN:Не получилось закрыть {} — закройте его вручную и нажмите «Подключить» ещё раз", failed.join(", ")));
+        return Err(format!("OTHER_VPN:Не получилось закрыть {} - закройте его вручную и нажмите «Подключить» ещё раз", failed.join(", ")));
     }
     if !killed.is_empty() { std::thread::sleep(Duration::from_millis(800)); }
     let token = crate::load_token();
@@ -894,7 +894,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
             },
         }
     } else {
-        guest.ok_or("Гостевой доступ закончился — войдите через Telegram")?
+        guest.ok_or("Гостевой доступ закончился - войдите через Telegram")?
     };
     let offline = url.is_empty();   // сервер недоступен - едем по сохранённой конфигурации
     if offline {
@@ -1094,7 +1094,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
             let fresh: Vec<String> = closed.into_iter().filter(|n| !told.contains(n)).collect();
             if !fresh.is_empty() {
                 told.extend(fresh.iter().cloned());
-                notify(&w, "connected", &format!("Закрыли {} — два VPN одновременно мешают друг другу", fresh.join(", ")));
+                notify(&w, "connected", &format!("Закрыли {} - два VPN одновременно мешают друг другу", fresh.join(", ")));
             }
             if crate::tun::active() {
                 // «пульс» (помощник снимает TUN, если приложение молчит 60 с); TUN пропал (помощник снял) - переподключаемся
@@ -1109,7 +1109,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                 if cur_gen(&w) != watch_gen || !wanted(&w) { break; }   // пока проверяли — нажали «Отключить»
                 set_proxy(true);
                 if !k.is_empty() {
-                    notify(&w, "connected", &format!("{} пытался перехватить подключение — защита восстановлена", k.join(", ")));
+                    notify(&w, "connected", &format!("{} пытался перехватить подключение - защита восстановлена", k.join(", ")));
                 }
             }
         }

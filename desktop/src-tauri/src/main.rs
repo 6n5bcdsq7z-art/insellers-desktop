@@ -328,7 +328,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                 let _ = items.status.set_text(if upd_ready { format!("⬆ Вышло обновление! · {st}") } else { st });
                 let _ = items.toggle.set_text(if on { "Отключить" } else { "Подключить" });
             }
-            let _ = tray.set_tooltip(Some(if on { format!("INSELLERS VPN — защищено\n↓ {down}   ↑ {up}") } else { "INSELLERS VPN — не подключено".to_string() }));
+            let _ = tray.set_tooltip(Some(if on { format!("INSELLERS VPN - защищено\n↓ {down}   ↑ {up}") } else { "INSELLERS VPN - не подключено".to_string() }));
             #[cfg(target_os = "macos")]
             {
                 let t = if on { format!("↓{down} ↑{up}") } else { String::new() };
