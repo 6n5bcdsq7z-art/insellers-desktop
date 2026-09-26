@@ -51,6 +51,20 @@ print("servers:", SERVERS)
 _, base_ip = curl("https://ifconfig.me")
 _, base_ip6 = curl("https://ifconfig.me", ["-6"], 8)
 print("runner ip:", base_ip, "ipv6:", base_ip6 or "нет")
+
+
+def resolver_ip():
+    """IP рекурсивного резолвера, который реально спросил (whoami.akamai.net отвечает адресом спросившего резолвера)."""
+    try:
+        return sorted({i[4][0] for i in socket.getaddrinfo("whoami.akamai.net", 80, socket.AF_INET)})
+    except OSError:
+        return []
+
+
+base_res = resolver_ip()
+print("resolver до TUN:", base_res)
+if not WIN:
+    print(subprocess.run(["scutil", "--dns"], capture_output=True, text=True).stdout[:1500])
 token = open(os.path.join(HD, "token")).read().strip()
 
 r = helper({"cmd": "up", "token": token, "socks": 38808, "bypass": sorted(SERVERS), "dns": "udp"})
@@ -77,7 +91,11 @@ ok("2. ssh (github.com:22) идёт через ядро VPN", ":22 [socks-in" in
    next((l[:160] for l in lg.splitlines() if ":22 [socks-in" in l), "нет строки в журнале ядра"))
 time.sleep(2)
 lg = xlog()
-ok("3b. DNS-запросы системы уходят в ядро (dns-out), не мимо", "-> dns-out]" in lg or ">> dns-out]" in lg)
+ok("3b. DNS-запросы системы уходят в ядро (dns-out), не мимо", "-> dns-out]" in lg or ">> dns-out]" in lg,
+   f"строк dns-out: {lg.count('dns-out]')}")
+tun_res = resolver_ip()
+ok("3c. нет утечки DNS: резолвер в TUN не резолвер раннера", bool(tun_res) and not (set(tun_res) & set(base_res)),
+   f"до {base_res} -> в TUN {tun_res}")
 ya = sorted({i[4][0] for i in socket.getaddrinfo("ya.ru", 443, socket.AF_INET)})
 curl("https://ya.ru/")
 time.sleep(2)

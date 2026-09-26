@@ -61,5 +61,5 @@ jobs:
         run: |
           D=$([ "$RUNNER_OS" = Windows ] && echo "/c/Program Files/INSELLERS VPN Helper" || echo /Library/PrivilegedHelperTools/su.insellers.helper)
           echo "--- helper.log"; sudo cat "$D/helper.log" 2>/dev/null || cat "$D/helper.log" 2>/dev/null
-          echo "--- sing-box.log"; sudo tail -40 "$D/sing-box.log" 2>/dev/null || tail -40 "$D/sing-box.log" 2>/dev/null
+          echo "--- sing-box.log"; sudo tail -80 "$D/sing-box.log" 2>/dev/null || tail -40 "$D/sing-box.log" 2>/dev/null
           echo "--- xray (последние)"; tail -40 xray-access.log 2>/dev/null | sed -E 's/email: \S+//'
