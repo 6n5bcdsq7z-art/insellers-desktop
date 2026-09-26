@@ -92,17 +92,10 @@ func config(socks int, bypass []string, dns string) ([]byte, error) {
 	if dns != "tcp" {
 		dns = "udp"
 	}
-	// DNS-серверы системы в локальной сети (роутер 192.168.x.1): маршрут к своей подсети точнее маршрутов TUN, и DNS шёл мимо
-	// туннеля (проверка на macOS: whoami.akamai.net - тот же резолвер). /32 на них - в TUN, дальше hijack-dns (26.09).
-	routes := []string{"0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"}
-	for _, d := range sysDNS() {
-		routes = append(routes, d+"/32")
-	}
 	tun := map[string]any{
 		"type": "tun", "tag": "tun-in",
-		"address":       []string{"172.19.0.1/30", "fdfe:dcba:9876::1/126"},
-		"route_address": routes,
-		"mtu":           1500, "auto_route": true, "strict_route": true, "stack": "mixed",
+		"address": []string{"172.19.0.1/30", "fdfe:dcba:9876::1/126"},
+		"mtu":     1500, "auto_route": true, "strict_route": true, "stack": "mixed",
 	}
 	if runtime.GOOS == "windows" {
 		tun["interface_name"] = "INSELLERS VPN"
@@ -139,29 +132,83 @@ func config(socks int, bypass []string, dns string) ([]byte, error) {
 	return json.MarshalIndent(c, "", "  ")
 }
 
-// sysDNS - IPv4 DNS-серверов системы в частных сетях (Mac - scutil --dns, Windows - Get-DnsClientServerAddress).
-func sysDNS() []string {
-	var out []byte
-	if runtime.GOOS == "darwin" {
-		out, _ = exec.Command("/usr/sbin/scutil", "--dns").Output()
-	} else if runtime.GOOS == "windows" {
-		out, _ = exec.Command("powershell", "-NoProfile", "-Command",
-			"(Get-DnsClientServerAddress -AddressFamily IPv4).ServerAddresses").Output()
+// macOS: DNS роутера (192.168.x.1) в своей подсети - маршрут к ней точнее маршрутов TUN, и запросы шли мимо туннеля (проверка
+// на раннере: whoami.akamai.net - тот же резолвер). Маршрутом «в TUN» чинить нельзя: DNS роутера обычно и шлюз - ломается вся
+// сеть. Поэтому на время TUN DNS каждой сетевой службы = 172.19.0.2 (внутри TUN, дальше hijack-dns), прежние - в dns-saved.json,
+// возврат при down и при запуске помощника после сбоя. Windows: утечку закрывает strict_route (проверено на раннере).
+const tunDNS = "172.19.0.2"
+
+func macServices() []string {
+	out, err := exec.Command("/usr/sbin/networksetup", "-listallnetworkservices").Output()
+	if err != nil {
+		return nil
 	}
-	seen := map[string]bool{}
-	res := []string{}
-	for _, f := range strings.FieldsFunc(string(out), func(r rune) bool { return r == ' ' || r == '\n' || r == '\r' || r == '\t' || r == ':' }) {
-		ip := net.ParseIP(strings.TrimSpace(f))
-		if ip == nil || ip.To4() == nil || !(ip.IsPrivate() || ip.IsLinkLocalUnicast()) || seen[ip.String()] {
+	var res []string
+	for i, l := range strings.Split(string(out), "\n") {
+		l = strings.TrimSpace(l)
+		if i == 0 || l == "" || strings.HasPrefix(l, "*") { // первая строка - пояснение, «*» - выключенная служба
 			continue
 		}
-		if strings.HasPrefix(ip.String(), "172.19.0.") { // наш TUN
-			continue
-		}
-		seen[ip.String()] = true
-		res = append(res, ip.String())
+		res = append(res, l)
 	}
 	return res
+}
+
+func macSetDNS() {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	saved := map[string][]string{}
+	sp := filepath.Join(dir, "dns-saved.json")
+	if b, err := os.ReadFile(sp); err == nil { // прошлый раз не вернули (сбой) - сохранённое не затираем
+		_ = json.Unmarshal(b, &saved)
+	} else {
+		for _, svc := range macServices() {
+			out, _ := exec.Command("/usr/sbin/networksetup", "-getdnsservers", svc).Output()
+			var cur []string
+			for _, f := range strings.Fields(string(out)) {
+				if net.ParseIP(f) != nil {
+					cur = append(cur, f)
+				}
+			}
+			saved[svc] = cur // пусто = DNS от DHCP
+		}
+		b, _ := json.Marshal(saved)
+		_ = os.WriteFile(sp, b, 0600)
+	}
+	for svc := range saved {
+		_ = exec.Command("/usr/sbin/networksetup", "-setdnsservers", svc, tunDNS).Run()
+	}
+	_ = exec.Command("/usr/bin/dscacheutil", "-flushcache").Run()
+	_ = exec.Command("/usr/bin/killall", "-HUP", "mDNSResponder").Run()
+}
+
+func macRestoreDNS() {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	sp := filepath.Join(dir, "dns-saved.json")
+	b, err := os.ReadFile(sp)
+	if err != nil {
+		return
+	}
+	saved := map[string][]string{}
+	if json.Unmarshal(b, &saved) != nil {
+		_ = os.Remove(sp)
+		return
+	}
+	for svc, cur := range saved {
+		args := []string{"-setdnsservers", svc}
+		if len(cur) == 0 {
+			args = append(args, "empty")
+		} else {
+			args = append(args, cur...)
+		}
+		_ = exec.Command("/usr/sbin/networksetup", args...).Run()
+	}
+	_ = os.Remove(sp)
+	_ = exec.Command("/usr/bin/dscacheutil", "-flushcache").Run()
+	_ = exec.Command("/usr/bin/killall", "-HUP", "mDNSResponder").Run()
 }
 
 func socksAlive(port int) bool {
@@ -179,6 +226,7 @@ func down(reason string) {
 	cmd, done := st.cmd, st.done
 	st.cmd, st.done = nil, nil
 	st.mu.Unlock()
+	defer macRestoreDNS()
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
@@ -243,6 +291,7 @@ func up(r req) error {
 	if !alive {
 		return fmt.Errorf("sing-box не запустился: %s", le)
 	}
+	macSetDNS()
 	return nil
 }
 
@@ -336,6 +385,7 @@ func main() {
 		log.Fatalf("listen: %v", err)
 	}
 	log.Printf("ins-helper %s слушает %s", Version, Listen)
+	macRestoreDNS() // помощник перезапущен после сбоя - DNS как был до TUN
 	go watchdog()
 	for {
 		c, err := ln.Accept()
