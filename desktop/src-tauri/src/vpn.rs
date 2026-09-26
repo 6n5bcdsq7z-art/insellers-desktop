@@ -197,7 +197,7 @@ pub fn cleanup_stale() {
 // 26.09: были 10808/10809 - это стандартные порты Happ/v2rayN; пока работал наш Xray, Happ не запускался
 // («Порт 10808 уже занят другим процессом»). Берём свои редкие порты.
 const SOCKS_PORT: u16 = 38808;
-const HTTP_PORT: u16 = 38809;
+pub const HTTP_PORT: u16 = 38809;
 /// 26.09: вход только для проверки пути реальной загрузкой (правило маршрута ведёт его строго в путь, см. add_probe_rule)
 const PROBE_PORT: u16 = 38810;
 const PROBE_URL: &str = "https://vpn.insellers.su/probe/";

@@ -7,6 +7,7 @@
 mod vpn;
 mod probe;
 mod tun;
+mod upd;
 
 use std::time::Duration;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -469,18 +470,24 @@ async fn check_update(app: AppHandle, manual: Option<bool>) -> Result<bool, Stri
                         let _ = w.eval(&format!("window.dispatchEvent(new CustomEvent('ins:update-progress',{{detail:{{pct:{pct},stage:'{stage}'}}}}))"));
                     }
                 };
+                // 26.09 ночь: одна загрузка за раз - повторный запрос только показывает прогресс текущей (upd.rs)
+                if upd::BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    emit(upd::PCT.load(std::sync::atomic::Ordering::SeqCst), "download");
+                    return Ok(true);
+                }
+                let _busy = upd::BusyGuard;
+                remote_log("update.download", serde_json::json!({"v": update.version}));
                 emit(0, "download");
-                let mut got: u64 = 0;
-                let mut last: u64 = 101;
-                let res = update.download_and_install(
-                    |chunk, total| {
-                        got += chunk as u64;
-                        let pct = total.map(|t| if t > 0 { got * 100 / t } else { 0 }).unwrap_or(0).min(100);
-                        if pct != last { last = pct; emit(pct, "download"); }
-                    },
-                    || emit(100, "install"),
-                ).await;
-                if let Err(e) = res { emit(0, "error"); return Err(e.to_string()); }
+                let bytes = match upd::fetch(update.download_url.as_str(), was_on, |p| emit(p, "download")).await {
+                    Ok(b) => b,
+                    Err(e) => { emit(0, "error"); remote_log("update.fail", serde_json::json!({"err": e})); return Err(e); }
+                };
+                let pubkey = app.config().plugins.0.get("updater").and_then(|u| u.get("pubkey")).and_then(|k| k.as_str()).unwrap_or("").to_string();
+                if let Err(e) = upd::verify(&bytes, &update.signature, &pubkey) {
+                    emit(0, "error"); remote_log("update.fail", serde_json::json!({"err": e})); return Err(e);
+                }
+                emit(100, "install");
+                if let Err(e) = update.install(&bytes) { emit(0, "error"); return Err(e.to_string()); }
                 if was_on { if let Some(p) = data_path("resume") { let _ = std::fs::write(p, "1"); } }
                 vpn::stop(&app);
                 app.restart();
