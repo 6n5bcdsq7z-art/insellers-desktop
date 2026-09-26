@@ -537,9 +537,20 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
     };
     let choice = if token.is_empty() { String::new() } else { transport_choice(&client, &token).await };
     let dir = data_dir(&app)?;
-    let (bin, run_args): (&str, Vec<String>) = if choice == "amneziawg" && !token.is_empty() {
-        let path = dir.join("awg.conf");
-        std::fs::write(&path, awg_conf(&client, &token).await?).map_err(|e| e.to_string())?;
+    // Протокол выбирают на уровне аккаунта: «AmneziaWG» с телефона приходит и сюда. Не получили ключ AWG (нет доступа,
+    // лимит, сервер AWG недоступен) - подключаемся через Xray как при «Автовыборе», а не отказываем (26.09: раньше Мак
+    // переставал подключаться из-за выбора на телефоне)
+    let awg_path = if choice == "amneziawg" && !token.is_empty() {
+        match awg_conf(&client, &token).await {
+            Ok(conf) => {
+                let p = dir.join("awg.conf");
+                std::fs::write(&p, conf).map_err(|e| e.to_string())?;
+                Some(p)
+            }
+            Err(e) => { crate::remote_log("vpn.awg_fallback", json!({"err": e})); None }
+        }
+    } else { None };
+    let (bin, run_args): (&str, Vec<String>) = if let Some(path) = awg_path {
         ("wireproxy", vec!["-c".into(), path.to_string_lossy().to_string()])
     } else {
     // 2) готовая конфигурация Xray
