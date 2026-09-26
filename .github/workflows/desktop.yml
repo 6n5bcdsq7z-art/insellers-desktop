@@ -1,0 +1,214 @@
+name: desktop
+# Сборка INSELLERS VPN для Windows и macOS и публикация на vpn.insellers.su/app/desktop/.
+# Запуск: вручную (Actions → desktop → Run workflow) или пушем тега desktop-v*.
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: "Что нового (показывается в обновлении)"
+        required: false
+        default: ""
+  schedule:
+    - cron: "0 1 * * *"      # ночью (04:00 МСК), сборка - только если за сутки менялась папка desktop/
+
+# новая сборка отменяет ещё идущую старую (публикация при этом строго по очереди)
+concurrency:
+  group: desktop-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.c.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Номер версии (1.0.(100 + номер запуска) - новее 1.0.36 из основного репо)
+        run: echo "VER=1.0.$((GITHUB_RUN_NUMBER + 100))" >> "$GITHUB_ENV"
+        shell: bash
+        with: { fetch-depth: 0 }
+      - id: c
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ -n "$(git log --since='25 hours ago' --format=%h -- desktop)" ]; then
+            echo build=true >> "$GITHUB_OUTPUT"; else echo build=false >> "$GITHUB_OUTPUT"; echo "desktop/ не менялась - сборки нет"; fi
+
+  build:
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            args: "--bundles nsis"
+            rust_targets: ""
+          - os: macos-latest
+            args: "--target universal-apple-darwin --bundles app,dmg"
+            rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+          - os: ubuntu-22.04
+            args: "--bundles appimage,deb"
+            rust_targets: ""
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: desktop
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Зависимости Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev libdbus-1-dev
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.rust_targets }}" }
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: "desktop/src-tauri -> target" }
+      - name: Версия 1.0.<номер сборки>
+        run: |
+          node -e "const f='src-tauri/tauri.conf.json';const j=require('./'+f);j.version=process.env.VER;require('fs').writeFileSync(f,JSON.stringify(j,null,2))"
+          sed -i.bak "s/^version = \"1.0.0\"/version = \"$VER\"/" src-tauri/Cargo.toml && rm -f src-tauri/Cargo.toml.bak
+      - run: npm install
+      - run: npx tauri icon src-tauri/app-icon.png
+      - name: Ядро Xray (sidecar)
+        run: |
+          set -e
+          mkdir -p src-tauri/binaries && cd src-tauri/binaries
+          base=https://github.com/XTLS/Xray-core/releases/latest/download
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o x.zip $base/Xray-windows-64.zip && unzip -o -q x.zip xray.exe && mv xray.exe xray-x86_64-pc-windows-msvc.exe
+          elif [ "$RUNNER_OS" = "Linux" ]; then
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o x.zip $base/Xray-linux-64.zip && unzip -o -q x.zip xray && mv xray xray-x86_64-unknown-linux-gnu && chmod +x xray-*
+          else
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o a.zip $base/Xray-macos-arm64-v8a.zip && unzip -o -q a.zip xray && mv xray xray-aarch64-apple-darwin
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o b.zip $base/Xray-macos-64.zip && unzip -o -q b.zip xray && mv xray xray-x86_64-apple-darwin
+            lipo -create -output xray-universal-apple-darwin xray-aarch64-apple-darwin xray-x86_64-apple-darwin
+            chmod +x xray-*
+          fi
+          rm -f *.zip; ls -la
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.26.x", cache: false }
+      - name: AmneziaWG - wireproxy-awg (sidecar, SOCKS5/HTTP на 127.0.0.1)
+        # github.com/artem-russkikh/wireproxy-awg @ 84f4795 (v1.0.18, amneziawg-go v3.1.20260814 - параметры AWG 2.0:
+        # Jc..S4, H1-H4 диапазонами, I1-I5). Коммит закреплён: новая версия - только после проверки.
+        run: |
+          set -e
+          git clone -q https://github.com/artem-russkikh/wireproxy-awg.git /tmp/wpa && git -C /tmp/wpa checkout -q 84f4795
+          out=$PWD/src-tauri/binaries; cd /tmp/wpa; export CGO_ENABLED=0
+          b() { GOOS=$1 GOARCH=$2 go build -trimpath -ldflags="-s -w" -o "$out/wireproxy-$3" ./cmd/wireproxy; }
+          if [ "$RUNNER_OS" = "Windows" ]; then b windows amd64 x86_64-pc-windows-msvc.exe
+          elif [ "$RUNNER_OS" = "Linux" ]; then b linux amd64 x86_64-unknown-linux-gnu
+          else
+            b darwin arm64 aarch64-apple-darwin; b darwin amd64 x86_64-apple-darwin
+            lipo -create -output "$out/wireproxy-universal-apple-darwin" "$out/wireproxy-aarch64-apple-darwin" "$out/wireproxy-x86_64-apple-darwin"
+          fi
+          chmod +x "$out"/wireproxy-*; ls -la "$out"
+      - name: Сборка (+ подпись обновлений)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -o pipefail
+          npx tauri build ${{ matrix.args }} 2>&1 | tee ../build-${{ matrix.os }}.log
+      - name: Лог ошибки → ветка ci-logs (чтобы разбирать без доступа к Actions UI)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          f=../build-${{ matrix.os }}.log
+          [ -f "$f" ] || echo "no log" > "$f"
+          tail -c 60000 "$f" > ../tail.log
+          gh api repos/${{ github.repository }}/git/refs/heads/ci-logs >/dev/null 2>&1 || \
+            gh api -X POST repos/${{ github.repository }}/git/refs -f ref=refs/heads/ci-logs -f sha=${{ github.sha }} >/dev/null
+          SHA=$(gh api "repos/${{ github.repository }}/contents/logs/${{ matrix.os }}.log?ref=ci-logs" --jq .sha 2>/dev/null || true)
+          B64=$(base64 -w0 ../tail.log 2>/dev/null || base64 ../tail.log | tr -d '\n')
+          if [ -n "$SHA" ]; then
+            gh api -X PUT "repos/${{ github.repository }}/contents/logs/${{ matrix.os }}.log" -f message="ci log ${{ matrix.os }}" -f branch=ci-logs -f content="$B64" -f sha="$SHA" >/dev/null
+          else
+            gh api -X PUT "repos/${{ github.repository }}/contents/logs/${{ matrix.os }}.log" -f message="ci log ${{ matrix.os }}" -f branch=ci-logs -f content="$B64" >/dev/null
+          fi
+      - name: Собрать файлы
+        run: |
+          mkdir -p ../out
+          find src-tauri/target -path '*/bundle/*' \( -name '*-setup.exe' -o -name '*-setup.exe.sig' -o -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' -o -name '*.AppImage' -o -name '*.AppImage.sig' -o -name '*.deb' \) -exec cp {} ../out/ \;
+          ls -la ../out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.os }}
+          path: out/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    concurrency: { group: desktop-publish, cancel-in-progress: false }   # публикации строго по очереди
+    timeout-minutes: 45
+    steps:
+      - name: Номер версии (1.0.(100 + номер запуска) - новее 1.0.36 из основного репо)
+        run: echo "VER=1.0.$((GITHUB_RUN_NUMBER + 100))" >> "$GITHUB_ENV"
+        shell: bash
+      - uses: actions/download-artifact@v4
+        with: { path: art, merge-multiple: true }
+      - name: Загрузить на vpn.insellers.su
+        env:
+          KEY: ${{ secrets.DESKTOP_UPLOAD_KEY }}
+          NOTES: ${{ github.event.inputs.notes }}
+        run: |
+          set -euo pipefail
+          cd art && ls -la
+          up() { # имя на сервере без пробелов
+            local src="$1" dst="$2"
+            echo "upload $dst ($(du -h "$src" | cut -f1))"
+            curl -fS --retry 3 --retry-delay 5 --max-time 900 -X POST -T "$src" -H "Content-Type: application/octet-stream" \
+              -w "  http=%{http_code} time=%{time_total}s speed=%{speed_upload}B/s\n" -o /tmp/resp.txt \
+              -H "X-CI-Key: $KEY" "https://vpn.insellers.su/api/ci/desktop-upload?name=$dst&ver=$VER" 2>&1 | tee -a ../publish.log
+            cat /tmp/resp.txt | tee -a ../publish.log; echo | tee -a ../publish.log
+          }
+          WIN=$(ls *-setup.exe | head -1); MACTGZ=$(ls *.app.tar.gz | head -1); DMG=$(ls *.dmg | head -1)
+          APPIMG=$(ls *.AppImage | head -1); DEB=$(ls *.deb | head -1)
+          up "$WIN" "INSELLERS-VPN-setup.exe" > ../up1.log 2>&1 &
+          up "$DMG" "INSELLERS-VPN.dmg" > ../up2.log 2>&1 &
+          up "$MACTGZ" "INSELLERS-VPN-mac.app.tar.gz" > ../up3.log 2>&1 &
+          up "$APPIMG" "INSELLERS-VPN.AppImage" > ../up4.log 2>&1 &
+          up "$DEB" "INSELLERS-VPN.deb" > ../up5.log 2>&1 &
+          fail=0; for j in $(jobs -p); do wait $j || fail=1; done
+          cat ../up*.log >> ../publish.log || true
+          [ $fail = 0 ] || { echo "upload failed"; exit 1; }
+          python3 - <<PY
+          import json, datetime, os
+          sig = lambda f: open(f).read().strip()
+          base = "https://vpn.insellers.su/app/desktop/v/$VER/"
+          mac = {"signature": sig("$MACTGZ.sig"), "url": base + "INSELLERS-VPN-mac.app.tar.gz"}
+          latest = {
+            "version": os.environ["VER"],
+            "notes": os.environ.get("NOTES") or "Обновление INSELLERS VPN",
+            "pub_date": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            "platforms": {
+              "windows-x86_64": {"signature": sig("$WIN.sig"), "url": base + "INSELLERS-VPN-setup.exe"},
+              "darwin-aarch64": mac, "darwin-x86_64": mac,
+              "linux-x86_64": {"signature": sig("$APPIMG.sig"), "url": base + "INSELLERS-VPN.AppImage"},
+            },
+          }
+          json.dump(latest, open("latest.json", "w"), ensure_ascii=False)
+          PY
+          curl -fsS --retry 3 -X POST --data-binary @latest.json -H "Content-Type: application/json" \
+            -H "X-CI-Key: $KEY" "https://vpn.insellers.su/api/ci/desktop-publish" | tee -a ../publish.log
+          echo "published $VER" | tee -a ../publish.log
+          # проверка: файлы из latest.json реально отдаются
+          python3 -c "import json;[print(v['url']) for v in json.load(open('latest.json'))['platforms'].values()]" | sort -u | while read u; do
+            echo "check $u -> $(curl -s -o /dev/null -w '%{http_code}' -I "$u")" | tee -a ../publish.log
+          done
+      - name: Лог публикации → ci-logs
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          f=publish.log; [ -f "$f" ] || echo "no log" > "$f"
+          SHA=$(gh api "repos/${{ github.repository }}/contents/logs/publish.log?ref=ci-logs" --jq .sha 2>/dev/null || true)
+          B64=$(base64 -w0 "$f")
+          if [ -n "$SHA" ]; then gh api -X PUT "repos/${{ github.repository }}/contents/logs/publish.log" -f message="publish log" -f branch=ci-logs -f content="$B64" -f sha="$SHA" >/dev/null
+          else gh api -X PUT "repos/${{ github.repository }}/contents/logs/publish.log" -f message="publish log" -f branch=ci-logs -f content="$B64" >/dev/null; fi

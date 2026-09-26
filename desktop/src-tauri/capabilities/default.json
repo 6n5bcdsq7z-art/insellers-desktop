@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "IPC только со своего домена",
+  "windows": ["main"],
+  "remote": { "urls": ["https://vpn.insellers.su/*"] },
+  "permissions": ["core:default", "updater:default", "process:allow-restart"]
+}
