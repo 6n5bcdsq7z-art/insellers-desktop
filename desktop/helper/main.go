@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -91,10 +92,17 @@ func config(socks int, bypass []string, dns string) ([]byte, error) {
 	if dns != "tcp" {
 		dns = "udp"
 	}
+	// DNS-серверы системы в локальной сети (роутер 192.168.x.1): маршрут к своей подсети точнее маршрутов TUN, и DNS шёл мимо
+	// туннеля (проверка на macOS: whoami.akamai.net - тот же резолвер). /32 на них - в TUN, дальше hijack-dns (26.09).
+	routes := []string{"0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"}
+	for _, d := range sysDNS() {
+		routes = append(routes, d+"/32")
+	}
 	tun := map[string]any{
 		"type": "tun", "tag": "tun-in",
-		"address": []string{"172.19.0.1/30", "fdfe:dcba:9876::1/126"},
-		"mtu":     1500, "auto_route": true, "strict_route": true, "stack": "mixed",
+		"address":       []string{"172.19.0.1/30", "fdfe:dcba:9876::1/126"},
+		"route_address": routes,
+		"mtu":           1500, "auto_route": true, "strict_route": true, "stack": "mixed",
 	}
 	if runtime.GOOS == "windows" {
 		tun["interface_name"] = "INSELLERS VPN"
@@ -129,6 +137,31 @@ func config(socks int, bypass []string, dns string) ([]byte, error) {
 		},
 	}
 	return json.MarshalIndent(c, "", "  ")
+}
+
+// sysDNS - IPv4 DNS-серверов системы в частных сетях (Mac - scutil --dns, Windows - Get-DnsClientServerAddress).
+func sysDNS() []string {
+	var out []byte
+	if runtime.GOOS == "darwin" {
+		out, _ = exec.Command("/usr/sbin/scutil", "--dns").Output()
+	} else if runtime.GOOS == "windows" {
+		out, _ = exec.Command("powershell", "-NoProfile", "-Command",
+			"(Get-DnsClientServerAddress -AddressFamily IPv4).ServerAddresses").Output()
+	}
+	seen := map[string]bool{}
+	res := []string{}
+	for _, f := range strings.FieldsFunc(string(out), func(r rune) bool { return r == ' ' || r == '\n' || r == '\r' || r == '\t' || r == ':' }) {
+		ip := net.ParseIP(strings.TrimSpace(f))
+		if ip == nil || ip.To4() == nil || !(ip.IsPrivate() || ip.IsLinkLocalUnicast()) || seen[ip.String()] {
+			continue
+		}
+		if strings.HasPrefix(ip.String(), "172.19.0.") { // наш TUN
+			continue
+		}
+		seen[ip.String()] = true
+		res = append(res, ip.String())
+	}
+	return res
 }
 
 func socksAlive(port int) bool {
