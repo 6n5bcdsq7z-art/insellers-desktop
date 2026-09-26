@@ -416,6 +416,7 @@ async fn sub_url(client: &reqwest::Client, token: &str) -> Result<String, String
         if i > 0 { crate::tokio_sleep(2).await; }
         match client.get(format!("{}/api/app/sub", crate::BASE)).header("X-App-Token", token)
             .timeout(Duration::from_secs(8)).send().await {
+            Ok(r) if r.status().is_server_error() => continue,   // 26.09: 502 на рестарте сервера - повтор, а не «ответил неверно»
             Ok(r) => { resp = Some(r); break; }
             Err(_) => continue,
         }
@@ -566,7 +567,7 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
             Err(e) => match guest {
                 Some(g) => g,
                 None => {
-                    if e == "Нет связи с сервером" && fresh_last(&last) { (String::new(), 0u64) } else { return Err(e) }
+                    if (e == "Нет связи с сервером" || e == "Сервер ответил неверно") && fresh_last(&last) { (String::new(), 0u64) } else { return Err(e) }
                 }
             },
         }
