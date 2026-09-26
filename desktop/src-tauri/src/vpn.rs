@@ -656,6 +656,13 @@ fn strip_geo_rules(cfg: &mut Value) {
             !(s.contains("geoip:") || s.contains("geosite:"))
         });
     }
+    // 26.09: и DNS-серверы с geosite: в domains - без geosite.dat ядро с ними не стартует (сервер держит их отдельной записью)
+    if let Some(servers) = cfg.pointer_mut("/dns/servers").and_then(|r| r.as_array_mut()) {
+        servers.retain(|v| {
+            let s = v.to_string();
+            !v.is_object() || !(s.contains("geoip:") || s.contains("geosite:"))
+        });
+    }
 }
 
 fn local_inbounds() -> Value {
@@ -762,7 +769,11 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
                 std::fs::write(&p, conf).map_err(|e| e.to_string())?;
                 Some(p)
             }
-            Err(e) => { crate::remote_log("vpn.awg_fallback", json!({"err": e})); None }
+            Err(e) => {
+                // нет доступа (402) / лимит устройств (409) - не отказ AWG: центр диагностики не должен штрафовать путь
+                let ev = if e.starts_with("Нет активной") || e.starts_with("Достигнут лимит") { "vpn.awg_unavailable" } else { "vpn.awg_fallback" };
+                crate::remote_log(ev, json!({"err": e})); None
+            }
         }
     } else { None };
     // 26.09 (владелец: «приложение врёт»): «Подключено» - только когда через туннель реально открылся внешний сайт.
