@@ -203,6 +203,13 @@ fn build_main(app: &AppHandle) -> tauri::Result<()> {
         .resizable(true)
         .initialization_script(&init_script(&token, &version))
         .initialization_script(&format!("window.__INS_V = {};", serde_json::to_string(&version).unwrap_or_default()))
+        // 26.09: после перезагрузки страницы (обновление веб-части, заставка → сайт) она не знала, что VPN уже включён
+        // (состояние приходит только событиями) - и её «автоподключение» перезапускало рабочее подключение
+        .on_page_load(|w, p| {
+            if p.event() == tauri::webview::PageLoadEvent::Finished && p.url().host_str() == Some(HOST) && vpn_running(w.app_handle()) {
+                let _ = w.eval("if(!window.__INS_VPN||window.__INS_VPN==='disconnected'){window.__INS_VPN='connected';if(!window.__INS_CONN_AT)window.__INS_CONN_AT=Date.now();window.dispatchEvent(new CustomEvent('ins:vpn',{detail:{state:'connected',msg:'',code:''}}))}");
+            }
+        })
         .on_navigation(move |u| {
             // своя локальная заставка (macOS/Linux: tauri://localhost, Windows: http(s)://tauri.localhost)
             if u.scheme() == "tauri" || u.host_str() == Some("tauri.localhost") { return true; }

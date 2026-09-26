@@ -402,8 +402,18 @@ fn mac_physical_if_when_hijacked() -> Option<String> {
 
 /// Ссылка на подписку человека по токену входа.
 async fn sub_url(client: &reqwest::Client, token: &str) -> Result<String, String> {
-    let sub: Value = client.get(format!("{}/api/app/sub", crate::BASE))
-        .header("X-App-Token", token).send().await.map_err(|_| "Нет связи с сервером".to_string())?
+    // 26.09: сразу после закрытия другого VPN (Happ в режиме TUN) сеть на Маке пару секунд «висит» - один запрос на 20 с
+    // давал «Нет связи с сервером», хотя повтор через 6 с проходил за 2 с. Теперь 3 попытки по 8 с с паузой 2 с.
+    let mut resp = None;
+    for i in 0..3 {
+        if i > 0 { crate::tokio_sleep(2).await; }
+        match client.get(format!("{}/api/app/sub", crate::BASE)).header("X-App-Token", token)
+            .timeout(Duration::from_secs(8)).send().await {
+            Ok(r) => { resp = Some(r); break; }
+            Err(_) => continue,
+        }
+    }
+    let sub: Value = resp.ok_or("Нет связи с сервером".to_string())?
         .json().await.map_err(|_| "Сервер ответил неверно".to_string())?;
     Ok(sub["sub"].as_str().ok_or("Нет активной подписки")?.to_string())
 }
