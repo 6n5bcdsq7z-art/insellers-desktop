@@ -276,7 +276,11 @@ async fn awg_conf(client: &reqwest::Client, token: &str) -> Result<String, Strin
 async fn transport_choice(client: &reqwest::Client, token: &str) -> String {
     let r = client.get(format!("{}/api/transport", crate::BASE)).header("X-App-Token", token).send().await;
     match r {
-        Ok(r) => r.json::<Value>().await.ok().and_then(|v| v["choice"].as_str().map(|s| s.to_string())).unwrap_or_default(),
+        // режим продления (26.09): сервер отдаёт grace=true - AmneziaWG в нём не пускается, берём Xray «только Telegram»
+        // (как при «Автовыборе»); после ролика/оплаты grace=false - при следующем подключении снова выбранный протокол
+        Ok(r) => r.json::<Value>().await.ok().map(|v| {
+            if v["grace"].as_bool().unwrap_or(false) { String::new() } else { v["choice"].as_str().unwrap_or("").to_string() }
+        }).unwrap_or_default(),
         Err(_) => String::new(),
     }
 }
