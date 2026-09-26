@@ -1,6 +1,6 @@
 // VPN-режим на компьютере: Xray (sidecar) + системный прокси.
 // Конфигурацию человека отдаёт наш сервер подписок (Xray JSON по User-Agent InsellersVPN/…),
-// здесь мы только подменяем входы на локальные 127.0.0.1:10808 (SOCKS) / :10809 (HTTP).
+// здесь мы только подменяем входы на локальные 127.0.0.1:38808 (SOCKS) / :38809 (HTTP).
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -188,8 +188,10 @@ pub fn cleanup_stale() {
     if proxy_left_on() { set_proxy(false); }
 }
 
-const SOCKS_PORT: u16 = 10808;
-const HTTP_PORT: u16 = 10809;
+// 26.09: были 10808/10809 - это стандартные порты Happ/v2rayN; пока работал наш Xray, Happ не запускался
+// («Порт 10808 уже занят другим процессом»). Берём свои редкие порты.
+const SOCKS_PORT: u16 = 38808;
+const HTTP_PORT: u16 = 38809;
 
 #[derive(Default)]
 pub struct VpnState {
