@@ -433,6 +433,178 @@ fn wanted(app: &AppHandle) -> bool {
     app.try_state::<VpnState>().map(|s| s.wanted.load(std::sync::atomic::Ordering::SeqCst)).unwrap_or(false)
 }
 
+// ---- проверка путей (26.09) ----
+static BAD_PATHS: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
+static CUR_PATH: Mutex<String> = Mutex::new(String::new());
+fn mark_bad(tag: &str) {
+    if tag.is_empty() { return; }
+    let mut g = BAD_PATHS.lock().unwrap();
+    g.retain(|(t, _)| t != tag);
+    g.push((tag.to_string(), crate::now_ms()));
+}
+fn is_bad(tag: &str) -> bool {
+    let now = crate::now_ms();
+    BAD_PATHS.lock().unwrap().iter().any(|(t, ts)| t == tag && now.saturating_sub(*ts) < 30 * 60 * 1000)
+}
+fn set_cur_path(tag: &str) { *CUR_PATH.lock().unwrap() = tag.to_string(); }
+fn cur_path() -> String { CUR_PATH.lock().unwrap().clone() }
+
+/// Метка пути конфигурации: «auto» - если в ней балансировщик, иначе тег первого выхода-прокси.
+fn path_tag(c: &Value) -> String {
+    if c.pointer("/routing/balancers").and_then(|b| b.as_array()).map(|a| !a.is_empty()).unwrap_or(false) { return "auto".into(); }
+    c["outbounds"].as_array().and_then(|a| a.iter().find(|o| is_proxy(o) || is_hy(o)))
+        .and_then(|o| o["tag"].as_str()).unwrap_or("").to_string()
+}
+
+/// Конфигурация с одним путём `main` (остальные выходы-прокси убраны, правила перенаправлены на него).
+fn single_from(c: &Value, main: &Value) -> Value {
+    let mut c = c.clone();
+    let all: Vec<Value> = c["outbounds"].as_array().cloned().unwrap_or_default();
+    let tag = main["tag"].as_str().unwrap_or("").to_string();
+    let others: Vec<String> = all.iter().filter(|o| (is_proxy(o) || is_hy(o)) && *o != main)
+        .map(|o| o["tag"].as_str().unwrap_or("").to_string()).collect();
+    let mut keep = vec![main.clone()];
+    keep.extend(all.into_iter().filter(|o| !is_proxy(o) && !is_hy(o)));
+    c["outbounds"] = Value::Array(keep);
+    if let Some(obj) = c.as_object_mut() { obj.remove("observatory"); obj.remove("burstObservatory"); }
+    if let Some(r) = c.get_mut("routing").and_then(|r| r.as_object_mut()) { r.remove("balancers"); }
+    if let Some(rules) = c.pointer_mut("/routing/rules").and_then(|r| r.as_array_mut()) {
+        for r in rules.iter_mut() {
+            if let Some(o) = r.as_object_mut() {
+                if o.remove("balancerTag").is_some() { o.insert("outboundTag".into(), json!(tag)); }
+            }
+            if r["outboundTag"].as_str().map(|t| others.iter().any(|x| x == t)).unwrap_or(false) { r["outboundTag"] = json!(tag); }
+        }
+    }
+    c
+}
+
+/// Кандидаты для подключения: сначала выбор человека (или «Автовыбор» сервера), потом каждый путь по одному
+/// в порядке сервера (TCP-пути, hy2 - последним). Пути, упавшие за последние 30 минут, - в конец. Не больше 5.
+async fn xray_candidates(app: &AppHandle, client: &reqwest::Client, url: &str, offline: bool, choice: &str,
+                         dir: &PathBuf, last: &PathBuf) -> Result<Vec<(String, Value)>, String> {
+    let mut raw_cands: Vec<Value> = Vec::new();
+    let fetched = if offline { None } else {
+        match client.get(url).send().await {
+            Ok(r) => Some(r.text().await.map_err(|e| e.to_string())?),
+            Err(_) if fresh_last(last) => None,           // сервер подписок не ответил - сохранённая конфигурация
+            Err(_) => return Err("Сервер подписок недоступен".to_string()),
+        }
+    };
+    let mut prepared = true;
+    if let Some(txt) = fetched {
+        let raw: Value = serde_json::from_str(&txt).map_err(|_| "Сервер ещё не отдаёт конфигурацию для приложения".to_string())?;
+        let list: Vec<Value> = match raw.clone() { Value::Array(a) => a, v => vec![v] };
+        // hy2 (UDP) первым - только если человек сам выбрал «Для Wi-Fi»
+        raw_cands.push(pick_config(raw, choice));
+        let mut hys = Vec::new();
+        for c in &list {
+            for o in c["outbounds"].as_array().cloned().unwrap_or_default() {
+                if is_proxy(&o) { raw_cands.push(single_from(c, &o)); } else if is_hy(&o) { hys.push(single_from(c, &o)); }
+            }
+        }
+        raw_cands.extend(hys);
+        prepared = false;
+    } else {
+        let b = std::fs::read(last).map_err(|_| "Нет связи с сервером".to_string())?;
+        raw_cands.push(serde_json::from_slice(&b).map_err(|_| "Нет связи с сервером".to_string())?);
+    }
+    let geo = if prepared { true } else { ensure_geo(app, dir).await };
+    let mut out: Vec<(String, Value)> = Vec::new();
+    for mut cfg in raw_cands {
+        if cfg.is_null() { continue; }
+        let tag = path_tag(&cfg);
+        if out.iter().any(|(t, _)| *t == tag) { continue; }
+        if !prepared {
+            tune(&mut cfg);
+            cfg["inbounds"] = local_inbounds();
+            cfg["log"] = json!({"loglevel": "warning"});
+            if !geo { strip_geo_rules(&mut cfg); }
+        }
+        out.push((tag, cfg));
+    }
+    if out.is_empty() { return Err("Сервер ещё не отдаёт конфигурацию для приложения".into()); }
+    // упавшие недавно - в конец (порядок остальных - как у сервера)
+    let (good, bad): (Vec<_>, Vec<_>) = out.into_iter().partition(|(t, _)| !is_bad(t));
+    let mut all = good; all.extend(bad); all.truncate(5);
+    Ok(all)
+}
+
+/// Запуск ядра (xray или wireproxy) + наблюдение за процессом: упал сам - переподключаемся или сообщаем.
+fn launch(app: &AppHandle, bin: &str, run_args: Vec<String>, dir: &PathBuf) -> Result<(), String> {
+    let (mut rx, child) = app.shell().sidecar(bin).map_err(|e| e.to_string())?
+        .env("XRAY_LOCATION_ASSET", dir.to_string_lossy().to_string())
+        .args(run_args)
+        .spawn().map_err(|e| format!("Не удалось запустить ядро: {e}"))?;
+    let my_pid = child.pid();
+    app.state::<VpnState>().child.lock().unwrap().replace(child);
+    let a = app.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            if let CommandEvent::Terminated(_) = ev {
+                // это наш процесс? Если его уже забрали (отключили, сменили путь) - ничего не делаем
+                let mine = {
+                    let st = a.state::<VpnState>();
+                    let mut g = st.child.lock().unwrap();
+                    if g.as_ref().map(|c| c.pid()) == Some(my_pid) { g.take(); true } else { false }
+                };
+                if !mine { break; }
+                if !wanted(&a) { break; }   // ещё проверяем путь или уже отключились - решает start()
+                let ks = crate::pref("killswitch");
+                if !ks { set_proxy(false); }   // Kill Switch: прокси остаётся на мёртвом порту - интернет на паузе
+                if crate::pref("reconnect") {
+                    let n = a.state::<VpnState>().retries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    notify(&a, "connecting", if ks { "Соединение прервано - интернет на паузе, переподключаемся…" } else { "Соединение прервано - переподключаемся…" });
+                    let b = a.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_secs([2u64, 5, 10, 20, 30][(n as usize).min(4)]));
+                        if !wanted(&b) { return; }
+                        match tauri::async_runtime::block_on(start(b.clone())) {
+                            Ok(()) => { b.state::<VpnState>().retries.store(0, std::sync::atomic::Ordering::SeqCst); notify(&b, "connected", "Соединение восстановлено"); }
+                            Err(e) if e == "CANCELLED" || e == "BUSY" => {}
+                            Err(e) => { if !crate::pref("killswitch") && wanted(&b) { set_proxy(false); } if wanted(&b) { notify(&b, "error", &e); } }
+                        }
+                    });
+                } else {
+                    notify(&a, if ks { "error" } else { "disconnected" }, if ks { "Соединение прервано - интернет на паузе (Kill Switch)" } else { "Соединение прервано" });
+                }
+                break;
+            }
+        }
+    });
+    Ok(())
+}
+fn kill_child(app: &AppHandle) {
+    let c = app.state::<VpnState>().child.lock().unwrap().take();
+    if let Some(c) = c { let _ = c.kill(); }
+}
+
+/// Открывается ли внешний сайт ЧЕРЕЗ наш локальный вход (путь реально пропускает трафик). До ~9 с.
+async fn link_ok() -> bool {
+    let client = match reqwest::Proxy::all(format!("http://127.0.0.1:{HTTP_PORT}"))
+        .and_then(|p| reqwest::Client::builder().proxy(p).timeout(Duration::from_secs(4)).build()) { Ok(c) => c, Err(_) => return false };
+    let t0 = std::time::Instant::now();
+    tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_millis(700))).await.ok();
+    while t0.elapsed() < Duration::from_secs(9) {
+        for u in ["http://cp.cloudflare.com/generate_204", "http://connectivitycheck.gstatic.com/generate_204"] {
+            if let Ok(r) = client.get(u).send().await {
+                let s = r.status().as_u16();
+                if s == 204 || s == 200 { return true; }
+            }
+        }
+        tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_millis(800))).await.ok();
+    }
+    false
+}
+/// Есть ли интернет вообще, без VPN (чтобы не менять путь, когда пропала сама сеть).
+async fn direct_ok() -> bool {
+    let client = match reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build() { Ok(c) => c, Err(_) => return false };
+    for u in ["http://connectivitycheck.gstatic.com/generate_204", "http://ya.ru/"] {
+        if let Ok(r) = client.get(u).send().await { if r.status().as_u16() < 500 { return true; } }
+    }
+    false
+}
+
 fn http() -> Result<reqwest::Client, String> {
     let mut h = reqwest::header::HeaderMap::new();
     let os = if cfg!(target_os = "macos") { "macOS" } else if cfg!(target_os = "windows") { "Windows" } else { "Linux" };
@@ -593,94 +765,59 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
             Err(e) => { crate::remote_log("vpn.awg_fallback", json!({"err": e})); None }
         }
     } else { None };
-    let is_awg = awg_path.is_some();
-    let (bin, run_args): (&str, Vec<String>) = if let Some(path) = awg_path {
-        ("wireproxy", vec!["-c".into(), path.to_string_lossy().to_string()])
-    } else {
-    // 2) готовая конфигурация Xray
-    let path = dir.join("config.json");
-    let fetched = if offline { None } else {
-        match client.get(&url).send().await {
-            Ok(r) => Some(r.text().await.map_err(|e| e.to_string())?),
-            Err(_) if fresh_last(&last) => None,          // сервер подписок не ответил - сохранённая конфигурация
-            Err(_) => return Err("Сервер подписок недоступен".to_string()),
+    // 26.09 (владелец: «приложение врёт»): «Подключено» - только когда через туннель реально открылся внешний сайт.
+    // Путь не пропускает трафик - сами пробуем следующий (порядок путей от сервера = выбор центра диагностики для
+    // провайдера), системный прокси ставим только на проверенный путь. Не прошёл ни один - честная ошибка.
+    let mut is_awg = false;
+    if let Some(path) = awg_path {
+        notify(&app, "connecting", "Подключаемся через AmneziaWG…");
+        launch(&app, "wireproxy", vec!["-c".into(), path.to_string_lossy().to_string()], &dir)?;
+        if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
+        if link_ok().await { is_awg = true; set_cur_path("awg"); }
+        else {
+            kill_child(&app);
+            set_awg_off(&dir);
+            crate::remote_log("vpn.awg_fallback", json!({"err": "no traffic at start"}));
+            notify(&app, "connecting", "AmneziaWG не пропускает трафик - пробуем другие пути…");
         }
-    };
-    if let Some(txt) = fetched {
-        let raw: Value = serde_json::from_str(&txt).map_err(|_| "Сервер ещё не отдаёт конфигурацию для приложения".to_string())?;
-        // hy2 (UDP) — только если человек сам выбрал «Для Wi-Fi» (у операторов РФ он «подключается», но трафик
-        // не идёт). Гостю и при неизвестном выборе — без hy2.
-        let mut cfg = pick_config(raw, &choice);
-        tune(&mut cfg);
-        cfg["inbounds"] = local_inbounds();
-        cfg["log"] = json!({"loglevel": "warning"});
-        if !ensure_geo(&app, &dir).await { strip_geo_rules(&mut cfg); }
-        let bytes = serde_json::to_vec(&cfg).unwrap();
-        std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
-        if !token.is_empty() { let _ = std::fs::write(&last, &bytes); }   // запасная копия - только своя подписка, не гостевая
-    } else {
-        std::fs::copy(&last, &path).map_err(|_| "Нет связи с сервером".to_string())?;
+        if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
     }
-    ("xray", vec!["run".into(), "-c".into(), path.to_string_lossy().to_string()])
-    };
-
-    // 3) запуск Xray
-    if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
-    let (mut rx, child) = app.shell().sidecar(bin).map_err(|e| e.to_string())?
-        .env("XRAY_LOCATION_ASSET", dir.to_string_lossy().to_string())
-        .args(run_args)
-        .spawn().map_err(|e| format!("Не удалось запустить ядро: {e}"))?;
-    let my_pid = child.pid();
-    app.state::<VpnState>().child.lock().unwrap().replace(child);
-
-    // следим за процессом: упал — выключаем прокси и сообщаем странице
-    let a = app.clone();
-    tauri::async_runtime::spawn(async move {
-        while let Some(ev) = rx.recv().await {
-            if let CommandEvent::Terminated(_) = ev {
-                // это наш процесс? Если его уже забрал stop() (человек отключил) или его сменило новое
-                // подключение — ничего не делаем, иначе старый процесс гасил бы новое подключение
-                let mine = {
-                    let st = a.state::<VpnState>();
-                    let mut g = st.child.lock().unwrap();
-                    if g.as_ref().map(|c| c.pid()) == Some(my_pid) { g.take(); true } else { false }
-                };
-                if !mine { break; }
-                if !wanted(&a) { set_proxy(false); notify(&a, "disconnected", ""); break; }
-                // ядро упало само
-                let ks = crate::pref("killswitch");
-                if !ks { set_proxy(false); }   // Kill Switch: прокси остаётся на мёртвом порту — интернет на паузе
-                if crate::pref("reconnect") {
-                    let n = a.state::<VpnState>().retries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    notify(&a, "connecting", if ks { "Соединение прервано - интернет на паузе, переподключаемся…" } else { "Соединение прервано - переподключаемся…" });
-                    let b = a.clone();
-                    // отдельный поток + block_on: рекурсивный start() нельзя отдать в spawn (future не Send)
-                    std::thread::spawn(move || {
-                        std::thread::sleep(Duration::from_secs([2u64, 5, 10, 20, 30][(n as usize).min(4)]));
-                        if !wanted(&b) { return; }
-                        match tauri::async_runtime::block_on(start(b.clone())) {
-                            Ok(()) => { b.state::<VpnState>().retries.store(0, std::sync::atomic::Ordering::SeqCst); notify(&b, "connected", "Соединение восстановлено"); }
-                            Err(e) if e == "CANCELLED" || e == "BUSY" => {}
-                            Err(e) => { if !crate::pref("killswitch") && wanted(&b) { set_proxy(false); } if wanted(&b) { notify(&b, "error", &e); } }
-                        }
-                    });
-                } else {
-                    notify(&a, if ks { "error" } else { "disconnected" }, if ks { "Соединение прервано - интернет на паузе (Kill Switch)" } else { "Соединение прервано" });
-                }
+    if !is_awg {
+        let cands = xray_candidates(&app, &client, &url, offline, &choice, &dir, &last).await?;
+        let path = dir.join("config.json");
+        let total = cands.len();
+        let mut ok_cfg: Option<Vec<u8>> = None;
+        for (i, (tag, cfg)) in cands.into_iter().enumerate() {
+            if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
+            if i > 0 { notify(&app, "connecting", &format!("Путь не отвечает - пробуем другой ({}/{})…", i + 1, total)); }
+            let bytes = serde_json::to_vec(&cfg).unwrap();
+            std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+            launch(&app, "xray", vec!["run".into(), "-c".into(), path.to_string_lossy().to_string()], &dir)?;
+            if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
+            if link_ok().await {
+                crate::remote_log("vpn.path_ok", json!({"path": tag, "try": i + 1}));
+                set_cur_path(&tag);
+                ok_cfg = Some(bytes);
                 break;
             }
+            crate::remote_log("vpn.path_dead", json!({"path": tag, "try": i + 1}));
+            mark_bad(&tag);
+            kill_child(&app);
         }
-    });
-
-    // 4) даём ядру подняться и включаем системный прокси — если за это время не нажали «Отключить»
-    std::thread::sleep(Duration::from_millis(700));
-    if cur_gen(&app) != my_gen {
-        let c = app.state::<VpnState>().child.lock().unwrap().take();
-        if let Some(c) = c { let _ = c.kill(); }
-        set_proxy(false);
-        return Err("CANCELLED".into());
+        match ok_cfg {
+            Some(b) => { if !token.is_empty() { let _ = std::fs::write(&last, &b); } }   // запасная копия - только проверенная
+            None => return Err("Не удалось подключиться: ни один путь не пропускает трафик. Попробуйте другую сеть или напишите в поддержку".into()),
+        }
     }
+    if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
+
+    // 4) путь проверен - включаем системный прокси и убеждаемся, что он встал на сеть
     set_proxy(true);
+    if !proxy_is_ours() { std::thread::sleep(Duration::from_millis(300)); set_proxy(true); }
+    if !proxy_is_ours() {
+        crate::remote_log("vpn.proxy_not_applied", json!({}));
+        if !proxy_left_on() { kill_child(&app); return Err("Не удалось включить VPN для этой сети. Переподключите Wi-Fi или перезапустите приложение".into()); }
+    }
     set_wanted(&app, true);
     UP_AT.store(crate::now_ms(), std::sync::atomic::Ordering::SeqCst);
     arm_guest_timer(&app, until);
@@ -767,6 +904,23 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
                         if !wanted(&b) { return; }
                         match tauri::async_runtime::block_on(start(b.clone())) {
                             Ok(()) => notify(&b, "connected", "Подключено через Xray"),
+                            Err(e) if e == "CANCELLED" || e == "BUSY" => {}
+                            Err(e) => { if !crate::pref("killswitch") && wanted(&b) { set_proxy(false); } if wanted(&b) { notify(&b, "error", &e); } }
+                        }
+                    });
+                    break;
+                }
+                if fails >= 3 && !is_awg && direct_ok().await {
+                    // интернет без VPN есть, а через путь - нет: путь умер (оператор начал резать) - уходим на следующий
+                    let dead = cur_path();
+                    mark_bad(&dead);
+                    crate::remote_log("vpn.path_switch", json!({"from": dead, "fails": fails}));
+                    notify(&h, "connecting", "Путь перестал отвечать - переключаемся на другой…");
+                    let b = h.clone();
+                    std::thread::spawn(move || {
+                        if !wanted(&b) { return; }
+                        match tauri::async_runtime::block_on(start(b.clone())) {
+                            Ok(()) => notify(&b, "connected", "Соединение восстановлено"),
                             Err(e) if e == "CANCELLED" || e == "BUSY" => {}
                             Err(e) => { if !crate::pref("killswitch") && wanted(&b) { set_proxy(false); } if wanted(&b) { notify(&b, "error", &e); } }
                         }
