@@ -53,7 +53,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJCNjlFM0Q4QzMwQTc4OEMKUldTTWVBckQyT05wS3dFc3hTd3RQZ2xhQng5N0l4NDMrM0h1UzlNbU84TE5ZZE11a2lqM3UveUMK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM4RDRDMDUwRjk3MjNDMzkKUldRNVBITDVVTURVT0FWRmQyVFRpNi9BR05oWnBtODhzeVJxNThnR0RnZVkzZkdzWERxMmRhU0wK",
       "endpoints": [
         "https://vpn.insellers.su/app/desktop/latest.json"
       ],
