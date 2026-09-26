@@ -107,6 +107,27 @@ jobs:
             lipo -create -output "$out/wireproxy-universal-apple-darwin" "$out/wireproxy-aarch64-apple-darwin" "$out/wireproxy-x86_64-apple-darwin"
           fi
           chmod +x "$out"/wireproxy-*; ls -la "$out"
+      - name: TUN - помощник ins-helper (Go) и sing-box 1.14.2 (sidecar)
+        # 26.09 (владелец): весь трафик компьютера через VPN. Помощник - desktop/helper, sing-box - официальный релиз (версия закреплена).
+        run: |
+          set -e
+          out=$PWD/src-tauri/binaries; SB=1.14.2; export CGO_ENABLED=0
+          hb() { (cd helper && GOOS=$1 GOARCH=$2 go build -trimpath -ldflags="-s -w" -o "$out/ins-helper-$3" .); }
+          get() { curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$2" "https://github.com/SagerNet/sing-box/releases/download/v$SB/sing-box-$SB-$1"; }
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            hb windows amd64 x86_64-pc-windows-msvc.exe
+            get windows-amd64.zip sb.zip && unzip -o -q sb.zip && mv "sing-box-$SB-windows-amd64/sing-box.exe" "$out/sing-box-x86_64-pc-windows-msvc.exe"
+          elif [ "$RUNNER_OS" = "Linux" ]; then
+            hb linux amd64 x86_64-unknown-linux-gnu
+            get linux-amd64.tar.gz sb.tgz && tar xzf sb.tgz && mv "sing-box-$SB-linux-amd64/sing-box" "$out/sing-box-x86_64-unknown-linux-gnu"
+          else
+            hb darwin arm64 aarch64-apple-darwin; hb darwin amd64 x86_64-apple-darwin
+            lipo -create -output "$out/ins-helper-universal-apple-darwin" "$out/ins-helper-aarch64-apple-darwin" "$out/ins-helper-x86_64-apple-darwin"
+            get darwin-arm64.tar.gz a.tgz && tar xzf a.tgz && mv "sing-box-$SB-darwin-arm64/sing-box" "$out/sing-box-aarch64-apple-darwin"
+            get darwin-amd64.tar.gz b.tgz && tar xzf b.tgz && mv "sing-box-$SB-darwin-amd64/sing-box" "$out/sing-box-x86_64-apple-darwin"
+            lipo -create -output "$out/sing-box-universal-apple-darwin" "$out/sing-box-aarch64-apple-darwin" "$out/sing-box-x86_64-apple-darwin"
+          fi
+          rm -rf sb.zip sb.tgz a.tgz b.tgz sing-box-$SB-*; chmod +x "$out"/ins-helper-* "$out"/sing-box-*; ls -la "$out"
       - name: Сборка (+ подпись обновлений)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
