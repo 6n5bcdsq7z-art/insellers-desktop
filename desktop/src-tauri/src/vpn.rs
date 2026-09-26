@@ -238,6 +238,15 @@ fn arm_guest_timer(app: &AppHandle, until: u64) {
 }
 
 /// Выбор протокола в мини-аппе (auto / reality / xhttp / hysteria2); не узнали — "".
+/// AmneziaWG на этом устройстве не проходит (26.09): ключ получили, а трафик через wireproxy не идёт - 6 часов AWG здесь
+/// не пробуем, подключаемся через Xray (как Android). Отметка - файл awg_off (время в мс) в папке данных.
+const AWG_OFF_MS: u64 = 6 * 3600 * 1000;
+fn awg_off(dir: &PathBuf) -> bool {
+    std::fs::read_to_string(dir.join("awg_off")).ok().and_then(|t| t.trim().parse::<u64>().ok())
+        .map(|t| crate::now_ms().saturating_sub(t) < AWG_OFF_MS).unwrap_or(false)
+}
+fn set_awg_off(dir: &PathBuf) { let _ = std::fs::write(dir.join("awg_off"), crate::now_ms().to_string()); }
+
 /// AmneziaWG (25.09): ключ этого компьютера с сервера и конфиг для wireproxy-awg — он поднимает AWG и отдаёт
 /// его как локальные SOCKS/HTTP-прокси на тех же портах, что Xray. Прав администратора не нужно.
 async fn awg_conf(client: &reqwest::Client, token: &str) -> Result<String, String> {
@@ -542,7 +551,7 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
     // Протокол выбирают на уровне аккаунта: «AmneziaWG» с телефона приходит и сюда. Не получили ключ AWG (нет доступа,
     // лимит, сервер AWG недоступен) - подключаемся через Xray как при «Автовыборе», а не отказываем (26.09: раньше Мак
     // переставал подключаться из-за выбора на телефоне)
-    let awg_path = if choice == "amneziawg" && !token.is_empty() {
+    let awg_path = if choice == "amneziawg" && !token.is_empty() && !awg_off(&dir) {
         match awg_conf(&client, &token).await {
             Ok(conf) => {
                 let p = dir.join("awg.conf");
@@ -552,6 +561,7 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
             Err(e) => { crate::remote_log("vpn.awg_fallback", json!({"err": e})); None }
         }
     } else { None };
+    let is_awg = awg_path.is_some();
     let (bin, run_args): (&str, Vec<String>) = if let Some(path) = awg_path {
         ("wireproxy", vec!["-c".into(), path.to_string_lossy().to_string()])
     } else {
@@ -688,6 +698,23 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
                 fails = 0;
             } else {
                 fails += 1;
+                // AmneziaWG: ключ получен, а трафика нет 2 проверки подряд - уходим на Xray и 6 часов AWG здесь не пробуем
+                if is_awg && fails >= 2 {
+                    if let Ok(d) = data_dir(&h) { set_awg_off(&d); }
+                    crate::remote_log("vpn.awg_fallback", json!({"err": "no traffic", "fails": fails}));
+                    notify(&h, "connecting", "AmneziaWG не пропускает трафик - переключаемся на Xray…");
+                    let b = h.clone();
+                    // отдельный поток + block_on, как при переподключении после падения ядра (future start() не Send)
+                    std::thread::spawn(move || {
+                        if !wanted(&b) { return; }
+                        match tauri::async_runtime::block_on(start(b.clone())) {
+                            Ok(()) => notify(&b, "connected", "Подключено через Xray"),
+                            Err(e) if e == "CANCELLED" || e == "BUSY" => {}
+                            Err(e) => { if !crate::pref("killswitch") && wanted(&b) { set_proxy(false); } if wanted(&b) { notify(&b, "error", &e); } }
+                        }
+                    });
+                    break;
+                }
                 if fails >= 3 && !degraded { degraded = true; mark(&h, 2); notify(&h, "degraded", "Нет ответа от сервера — восстанавливаем соединение"); }
                 // 2026-09-24 ХОТФИКС: без автоматического перезапуска — при ложной тревоге он рвал рабочее
                 // подключение (стоп → системный прокси снят). Только честный статус на экране.
