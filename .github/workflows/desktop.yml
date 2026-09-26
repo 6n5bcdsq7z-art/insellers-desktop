@@ -26,9 +26,6 @@ jobs:
       build: ${{ steps.c.outputs.build }}
     steps:
       - uses: actions/checkout@v4
-      - name: Номер версии (1.0.(100 + номер запуска) - новее 1.0.36 из основного репо)
-        run: echo "VER=1.0.$((GITHUB_RUN_NUMBER + 100))" >> "$GITHUB_ENV"
-        shell: bash
         with: { fetch-depth: 0 }
       - id: c
         run: |
@@ -58,6 +55,9 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - name: Номер версии (1.0.(100 + номер запуска) - новее 1.0.36 из основного репо)
+        run: echo "VER=1.0.$((GITHUB_RUN_NUMBER + 100))" >> "$GITHUB_ENV"
+        shell: bash
       - name: Зависимости Linux
         if: runner.os == 'Linux'
         run: |
