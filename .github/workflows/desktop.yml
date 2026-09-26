@@ -228,6 +228,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           f=publish.log; [ -f "$f" ] || echo "no log" > "$f"
+          tail -c 60000 "$f" > publish.tail.log; f=publish.tail.log   # целиком не влезает в аргумент gh («Argument list too long»)
           SHA=$(gh api "repos/${{ github.repository }}/contents/logs/publish.log?ref=ci-logs" --jq .sha 2>/dev/null || true)
           B64=$(base64 -w0 "$f")
           if [ -n "$SHA" ]; then gh api -X PUT "repos/${{ github.repository }}/contents/logs/publish.log" -f message="publish log" -f branch=ci-logs -f content="$B64" -f sha="$SHA" >/dev/null
