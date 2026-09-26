@@ -253,6 +253,20 @@ fn awg_off(dir: &PathBuf) -> bool {
 }
 fn set_awg_off(dir: &PathBuf) { let _ = std::fs::write(dir.join("awg_off"), crate::now_ms().to_string()); }
 
+/// Шлюз по умолчанию физической сети (для журнала «сменилась сеть»): macOS - `route -n get default` (при TUN это
+/// маршрут sing-box, поэтому берём строку interface+gateway как есть - смена Wi-Fi всё равно меняет её), Windows - пусто.
+fn default_gateway() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(o) = std::process::Command::new("/sbin/route").args(["-n", "get", "default"]).output() {
+            let t = String::from_utf8_lossy(&o.stdout);
+            return t.lines().filter(|l| l.contains("gateway:") || l.contains("interface:"))
+                .map(|l| l.trim().to_string()).collect::<Vec<_>>().join(" ");
+        }
+    }
+    String::new()
+}
+
 /// AmneziaWG (25.09): ключ этого компьютера с сервера и конфиг для wireproxy-awg — он поднимает AWG и отдаёт
 /// его как локальные SOCKS/HTTP-прокси на тех же портах, что Xray. Прав администратора не нужно.
 async fn awg_conf(client: &reqwest::Client, token: &str) -> Result<String, String> {
@@ -988,8 +1002,26 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
     let w = app.clone();
     tauri::async_runtime::spawn(async move {
         let mut told: Vec<String> = Vec::new();
+        // 26.09 ночь: сон/пробуждение и смена сети - в журнал (утром проверяем, как VPN поднимается после них).
+        // Сон = часы ушли вперёд больше чем на 30 с между 5-секундными шагами; сеть = сменился шлюз по умолчанию (раз в 30 с).
+        let mut last_tick = crate::now_ms();
+        let mut last_gw = String::new();
+        let mut tick = 0u32;
         loop {
             tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_secs(5))).await.ok();
+            let now = crate::now_ms();
+            if now.saturating_sub(last_tick) > 30_000 {
+                crate::remote_log("sys.wake", json!({"gap_s": now.saturating_sub(last_tick) / 1000, "tun": crate::tun::active()}));
+            }
+            last_tick = now;
+            tick += 1;
+            if tick % 6 == 1 {
+                let gw = tauri::async_runtime::spawn_blocking(default_gateway).await.unwrap_or_default();
+                if !last_gw.is_empty() && gw != last_gw {
+                    crate::remote_log("sys.net", json!({"gw_changed": true, "has_gw": !gw.is_empty(), "tun": crate::tun::active()}));
+                }
+                if !gw.is_empty() || !last_gw.is_empty() { last_gw = gw; }
+            }
             let is_running = |w: &AppHandle| w.try_state::<VpnState>().map(|s| s.child.lock().unwrap().is_some()).unwrap_or(false);
             let mut running = is_running(&w);
             if !running {   // горячая замена ядра (этап 3) - child пуст на миг: перепроверяем через 2 с
