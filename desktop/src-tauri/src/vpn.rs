@@ -720,7 +720,7 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
             if cur_gen(&pr) != watch_gen || !wanted(&pr) { break; }
             if let Ok(d) = data_dir(&pr) {
                 if crate::probe::due(&d) {
-                    if let Ok(c) = http() { crate::probe::run_once(c, crate::load_token()).await; }
+                    crate::probe::run_once(crate::load_token()).await;
                 }
             }
             crate::tokio_sleep(300).await;

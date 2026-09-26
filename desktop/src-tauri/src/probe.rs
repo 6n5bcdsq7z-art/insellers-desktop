@@ -75,8 +75,11 @@ fn low_power() -> bool {
 }
 
 /// Один раунд: план с сервера → замеры в отдельных потоках → отчёт.
-pub async fn run_once(client: reqwest::Client, token: String) {
+pub async fn run_once(token: String) {
     if token.is_empty() || low_power() { return; }
+    // мимо системного прокси (он же туннель): иначе сервер видит IP нашего сервера, а не провайдера человека
+    let client = match reqwest::Client::builder().no_proxy().user_agent(format!("InsellersVPN/desktop-{}", env!("CARGO_PKG_VERSION")))
+        .build() { Ok(c) => c, Err(_) => return };
     let plan: Value = match client.get(format!("{}/api/app/probe-plan", crate::BASE)).header("X-App-Token", &token)
         .timeout(Duration::from_secs(15)).send().await {
         Ok(r) if r.status().is_success() => r.json().await.unwrap_or(Value::Null),
