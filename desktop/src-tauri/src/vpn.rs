@@ -200,6 +200,7 @@ const SOCKS_PORT: u16 = 38808;
 pub const HTTP_PORT: u16 = 38809;
 /// 26.09: вход только для проверки пути реальной загрузкой (правило маршрута ведёт его строго в путь, см. add_probe_rule)
 const PROBE_PORT: u16 = 38810;
+const API_PORT: u16 = 38813;
 const PROBE_URL: &str = "https://vpn.insellers.su/probe/";
 
 #[derive(Default)]
@@ -500,10 +501,30 @@ fn add_probe_rule(cfg: &mut Value) {
     let rule = if !bal.is_empty() { json!({"type": "field", "inboundTag": ["probe-in"], "balancerTag": bal}) }
                else { json!({"type": "field", "inboundTag": ["probe-in"], "outboundTag": main}) };
     if !cfg["routing"].is_object() { cfg["routing"] = json!({}); }
+    cfg["api"] = json!({"tag": "api", "services": ["RoutingService"]});   // этап 7: xray api bo
     let old = cfg["routing"]["rules"].as_array().cloned().unwrap_or_default();
-    let mut rules = vec![rule];
+    let mut rules = vec![json!({"type": "field", "inboundTag": ["api-in"], "outboundTag": "api"}), rule];
     rules.extend(old);
     cfg["routing"]["rules"] = Value::Array(rules);
+}
+
+/// Этап 7 (26.09 ночь): путь «Автовыбора» умер - мгновенно на живой выход балансировщика через API ядра (без перезапуска:
+/// системный прокси, TUN и открытые соединения других путей не трогаем). Каждый кандидат проверяем реальной загрузкой 32 КБ.
+/// None - ядро без API / балансировщика или живых нет: тогда обычный перезапуск на следующий путь.
+async fn hot_switch(app: &AppHandle, dir: &PathBuf, cur: &str) -> Option<String> {
+    let cfg: Value = serde_json::from_slice(&std::fs::read(dir.join("config.json")).ok()?).ok()?;
+    let bal = cfg.pointer("/routing/balancers/0/tag").and_then(|v| v.as_str())?.to_string();
+    let tags: Vec<String> = cfg["outbounds"].as_array()?.iter()
+        .filter_map(|o| o["tag"].as_str().map(|t| t.to_string()))
+        .filter(|t| (t == "proxy" || t.starts_with("srv:")) && t != cur)
+        .collect();
+    for t in tags {
+        let args: Vec<String> = vec!["api".into(), "bo".into(), format!("--server=127.0.0.1:{API_PORT}"), "-b".into(), bal.clone(), t.clone()];
+        let out = app.shell().sidecar("xray").ok()?.args(args).output().await.ok()?;
+        if !out.status.success() { return None; }
+        if probe_real("32k").await.0 { return Some(t); }
+    }
+    None
 }
 
 /// Скачать `size` (256k | 32k) с нашего сервера ЧЕРЕЗ путь (вход probe-in): (ok, байт, мс, причина отказа:
@@ -767,7 +788,9 @@ fn local_inbounds() -> Value {
          "settings": {"udp": true}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]}},
         {"tag": "http-in", "listen": "127.0.0.1", "port": HTTP_PORT, "protocol": "http",
          "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}},
-        {"tag": "probe-in", "listen": "127.0.0.1", "port": PROBE_PORT, "protocol": "http"}
+        {"tag": "probe-in", "listen": "127.0.0.1", "port": PROBE_PORT, "protocol": "http"},
+        // этап 7 (26.09 ночь): API ядра только с этого компьютера - переключение пути без перезапуска (xray api bo)
+        {"tag": "api-in", "listen": "127.0.0.1", "port": API_PORT, "protocol": "dokodemo-door", "settings": {"address": "127.0.0.1"}}
     ])
 }
 
@@ -1127,6 +1150,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         let mut n = 0u32;
         let mut last_ok_log = 0u64;
         let mut manual_warned = 0u64;
+        let mut hot_cur = String::new();   // этап 7: выход, на который переключили балансировщик через API
         loop {
             if cur_gen(&h) != watch_gen || !wanted(&h) { break; }
             let mut ok = false;
@@ -1261,6 +1285,13 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                             degraded = true; mark(&h, 2);
                             notify(&h, "degraded", "Выбранный протокол сейчас не пропускает трафик - включите «Автовыбор» в настройках");
                         }
+                    } else if let Some(to) = { let t0 = crate::now_ms(); hot_switch(&h, &h_dir, &hot_cur).await.map(|t| (t, t0)) } {
+                        // этап 7: без перезапуска ядра
+                        crate::remote_log("vpn.hot_switch", json!({"from": dead_desc, "to": to.0, "gap_ms": crate::now_ms().saturating_sub(to.1)}));
+                        hot_cur = to.0;
+                        fails = 0;
+                        if degraded { degraded = false; }
+                        notify(&h, "connected", "Соединение восстановлено");
                     } else {
                         mark_bad(&dead);
                         notify(&h, "connecting", "Путь перестал отвечать - переключаемся на другой…");
