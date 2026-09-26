@@ -1,0 +1,63 @@
+name: tun-test
+# Проверка механизма TUN (ins-helper + sing-box + ядро xray) на настоящих macOS и Windows. Запуск вручную.
+# Конфигурация тестового ключа - секрет TUN_TEST_CONFIG (временный ключ, удаляется после проверки).
+permissions:
+  contents: read
+on:
+  workflow_dispatch:
+jobs:
+  tun:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.26.x", cache: false }
+      - name: Ядро, sing-box, помощник, гео
+        env:
+          CFG: ${{ secrets.TUN_TEST_CONFIG }}
+        run: |
+          set -e
+          printf '%s' "$CFG" > client.json
+          SB=1.14.2; X=https://github.com/XTLS/Xray-core/releases/latest/download
+          G=https://github.com/SagerNet/sing-box/releases/download/v$SB
+          (cd desktop/helper && CGO_ENABLED=0 go build -o ../../ins-helper$([ "$RUNNER_OS" = Windows ] && echo .exe) .)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            curl -fsSL -o x.zip $X/Xray-windows-64.zip && unzip -o -q x.zip xray.exe
+            curl -fsSL -o s.zip $G/sing-box-$SB-windows-amd64.zip && unzip -o -q s.zip && cp sing-box-$SB-windows-amd64/sing-box.exe .
+          else
+            curl -fsSL -o x.zip $X/Xray-macos-arm64-v8a.zip && unzip -o -q x.zip xray
+            curl -fsSL -o s.tgz $G/sing-box-$SB-darwin-arm64.tar.gz && tar xzf s.tgz && cp sing-box-$SB-darwin-arm64/sing-box .
+          fi
+          curl -fsSL -o geoip.dat https://vpn.insellers.su/app/geo/geoip.dat
+          curl -fsSL -o geosite.dat https://vpn.insellers.su/app/geo/geosite.dat
+          ls -la
+      - name: Помощник (как после установки) и ядро
+        run: |
+          set -e
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            D="/c/Program Files/INSELLERS VPN Helper"; mkdir -p "$D"; cp ins-helper.exe sing-box.exe "$D/"
+            echo testtoken0123456789 > "$D/token"
+            powershell -Command "Start-Process -FilePath 'C:\Program Files\INSELLERS VPN Helper\ins-helper.exe' -WindowStyle Hidden"
+          else
+            D=/Library/PrivilegedHelperTools/su.insellers.helper
+            sudo mkdir -p $D && sudo cp ins-helper sing-box $D/ && echo testtoken0123456789 | sudo tee $D/token >/dev/null && sudo chmod 644 $D/token
+            sudo nohup $D/ins-helper >/dev/null 2>&1 &
+          fi
+          XRAY_LOCATION_ASSET=$PWD nohup ./xray run -c client.json > xray.out 2>&1 &
+          sleep 5; tail -3 xray.out
+      - name: Проверки
+        run: python3 .github/tun_test.py || python .github/tun_test.py
+      - name: Журналы
+        if: always()
+        run: |
+          D=$([ "$RUNNER_OS" = Windows ] && echo "/c/Program Files/INSELLERS VPN Helper" || echo /Library/PrivilegedHelperTools/su.insellers.helper)
+          echo "--- helper.log"; sudo cat "$D/helper.log" 2>/dev/null || cat "$D/helper.log" 2>/dev/null
+          echo "--- sing-box.log"; sudo tail -40 "$D/sing-box.log" 2>/dev/null || tail -40 "$D/sing-box.log" 2>/dev/null
+          echo "--- xray (последние)"; tail -40 xray-access.log 2>/dev/null | sed -E 's/email: \S+//'
