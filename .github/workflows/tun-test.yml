@@ -53,7 +53,9 @@ jobs:
           XRAY_LOCATION_ASSET=$PWD nohup ./xray run -c client.json > xray.out 2>&1 &
           sleep 5; tail -3 xray.out
       - name: Проверки
-        run: python3 .github/tun_test.py || python .github/tun_test.py
+        env:
+          PYTHONIOENCODING: utf-8
+        run: $( [ "$RUNNER_OS" = Windows ] && echo python || echo python3 ) .github/tun_test.py
       - name: Журналы
         if: always()
         run: |

@@ -49,14 +49,20 @@ for o in cfg["outbounds"]:
                 pass
 print("servers:", SERVERS)
 _, base_ip = curl("https://ifconfig.me")
-print("runner ip:", base_ip)
+_, base_ip6 = curl("https://ifconfig.me", ["-6"], 8)
+print("runner ip:", base_ip, "ipv6:", base_ip6 or "нет")
 token = open(os.path.join(HD, "token")).read().strip()
 
 r = helper({"cmd": "up", "token": token, "socks": 38808, "bypass": sorted(SERVERS), "dns": "udp"})
 ok("helper up", r.get("ok"), json.dumps(r, ensure_ascii=False))
 time.sleep(5)
 rc, ip = curl("https://ifconfig.me")
-ok("1. curl ifconfig.me без прокси = IP сервера VPN", ip in SERVERS, f"{ip} (раннер {base_ip})")
+# выход через туннель = адрес сервера (IPv4 или IPv6 сервера - сервер сам выходит по IPv6), не адрес раннера
+ok("1. curl ifconfig.me без прокси = выход через сервер VPN", bool(ip) and ip not in (base_ip, base_ip6), f"{ip} (раннер {base_ip})")
+try:
+    socket.getaddrinfo("t%d.example.org" % int(time.time()), 443)   # новое имя - без кеша
+except OSError:
+    pass
 try:
     socket.getaddrinfo("example.com", 443)
     dns_ok = True
@@ -69,14 +75,17 @@ time.sleep(1)
 lg = xlog()
 ok("2. ssh (github.com:22) идёт через ядро VPN", ":22 [socks-in" in lg,
    next((l[:160] for l in lg.splitlines() if ":22 [socks-in" in l), "нет строки в журнале ядра"))
-ok("3b. DNS-запросы системы уходят в ядро (dns-out), не мимо", "-> dns-out]" in lg or ">> dns-out]" in lg)
-curl("https://ya.ru/")
-time.sleep(1)
+time.sleep(2)
 lg = xlog()
-ok("4. RU-сайт (ya.ru) - напрямую через ядро (правило RU-direct)",
-   any("ya.ru:443 [socks-in" in l and "direct]" in l for l in lg.splitlines()))
+ok("3b. DNS-запросы системы уходят в ядро (dns-out), не мимо", "-> dns-out]" in lg or ">> dns-out]" in lg)
+ya = sorted({i[4][0] for i in socket.getaddrinfo("ya.ru", 443, socket.AF_INET)})
+curl("https://ya.ru/")
+time.sleep(2)
+lg = xlog()
+ok("4. RU-сайт (ya.ru) - через ядро, напрямую (RU-direct)",
+   any(("ya.ru:443 [socks-in" in l or any(f"{a}:443 [socks-in" in l for a in ya)) and "direct]" in l for l in lg.splitlines()), str(ya))
 rc6, ip6 = curl("https://ifconfig.me", ["-6"], 8)
-ok("5. IPv6 мимо туннеля не утекает", rc6 != 0 or not ip6, f"rc={rc6} {ip6}")
+ok("5. IPv6 мимо туннеля не утекает (нет своего IPv6 раннера)", rc6 != 0 or not ip6 or ip6 != base_ip6, f"rc={rc6} {ip6}")
 r = helper({"cmd": "down"})
 time.sleep(3)
 rc, ip = curl("https://ifconfig.me")
