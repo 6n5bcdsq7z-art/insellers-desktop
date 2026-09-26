@@ -400,6 +400,13 @@ fn mac_physical_if_when_hijacked() -> Option<String> {
         .and_then(|v| v.split_whitespace().find(|n| !virt(n)).map(|n| n.to_string()))
 }
 
+/// Есть ли свежая (не старше 14 дней) сохранённая рабочая конфигурация.
+fn fresh_last(p: &std::path::Path) -> bool {
+    std::fs::metadata(p).and_then(|m| m.modified())
+        .map(|t| t.elapsed().map(|d| d.as_secs() < 14 * 86400).unwrap_or(false))
+        .unwrap_or(false)
+}
+
 /// Ссылка на подписку человека по токену входа.
 async fn sub_url(client: &reqwest::Client, token: &str) -> Result<String, String> {
     // 26.09: сразу после закрытия другого VPN (Happ в режиме TUN) сеть на Маке пару секунд «висит» - один запрос на 20 с
@@ -548,17 +555,30 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
     let guest = crate::guest_load();
     if token.is_empty() && guest.is_none() { return Err("Войдите через Telegram".into()); }
     let client = http()?;
+    let dir = data_dir(&app)?;
+    // 26.09: последняя рабочая конфигурация. Если наш сервер напрямую недоступен (сеть режет vpn.insellers.su или Мак
+    // ещё не отошёл после закрытия другого VPN) - подключаемся по ней, а не пишем «Нет связи с сервером», пока Happ работает.
+    let last = dir.join("config.last.json");
     // 1) ссылка на свою подписку (или гостевая на 5 минут — вошёл, а подписки ещё нет)
     let (url, until) = if !token.is_empty() {
         match sub_url(&client, &token).await {
             Ok(u) => (u, 0u64),
-            Err(e) => match guest { Some(g) => g, None => return Err(e) },
+            Err(e) => match guest {
+                Some(g) => g,
+                None => {
+                    if e == "Нет связи с сервером" && fresh_last(&last) { (String::new(), 0u64) } else { return Err(e) }
+                }
+            },
         }
     } else {
         guest.ok_or("Гостевой доступ закончился — войдите через Telegram")?
     };
-    let choice = if token.is_empty() { String::new() } else { transport_choice(&client, &token).await };
-    let dir = data_dir(&app)?;
+    let offline = url.is_empty();   // сервер недоступен - едем по сохранённой конфигурации
+    if offline {
+        notify(&app, "connecting", "Сервер недоступен напрямую - подключаемся по сохранённым настройкам…");
+        crate::remote_log("vpn.cached_config", json!({}));
+    }
+    let choice = if token.is_empty() || offline { String::new() } else { transport_choice(&client, &token).await };
     // Протокол выбирают на уровне аккаунта: «AmneziaWG» с телефона приходит и сюда. Не получили ключ AWG (нет доступа,
     // лимит, сервер AWG недоступен) - подключаемся через Xray как при «Автовыборе», а не отказываем (26.09: раньше Мак
     // переставал подключаться из-за выбора на телефоне)
@@ -577,18 +597,29 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
         ("wireproxy", vec!["-c".into(), path.to_string_lossy().to_string()])
     } else {
     // 2) готовая конфигурация Xray
-    let txt = client.get(&url).send().await.map_err(|_| "Сервер подписок недоступен".to_string())?
-        .text().await.map_err(|e| e.to_string())?;
-    let raw: Value = serde_json::from_str(&txt).map_err(|_| "Сервер ещё не отдаёт конфигурацию для приложения".to_string())?;
-    // hy2 (UDP) — только если человек сам выбрал «Для Wi-Fi» (у операторов РФ он «подключается», но трафик
-    // не идёт). Гостю и при неизвестном выборе — без hy2.
-    let mut cfg = pick_config(raw, &choice);
-    tune(&mut cfg);
-    cfg["inbounds"] = local_inbounds();
-    cfg["log"] = json!({"loglevel": "warning"});
-    if !ensure_geo(&app, &dir).await { strip_geo_rules(&mut cfg); }
     let path = dir.join("config.json");
-    std::fs::write(&path, serde_json::to_vec(&cfg).unwrap()).map_err(|e| e.to_string())?;
+    let fetched = if offline { None } else {
+        match client.get(&url).send().await {
+            Ok(r) => Some(r.text().await.map_err(|e| e.to_string())?),
+            Err(_) if fresh_last(&last) => None,          // сервер подписок не ответил - сохранённая конфигурация
+            Err(_) => return Err("Сервер подписок недоступен".to_string()),
+        }
+    };
+    if let Some(txt) = fetched {
+        let raw: Value = serde_json::from_str(&txt).map_err(|_| "Сервер ещё не отдаёт конфигурацию для приложения".to_string())?;
+        // hy2 (UDP) — только если человек сам выбрал «Для Wi-Fi» (у операторов РФ он «подключается», но трафик
+        // не идёт). Гостю и при неизвестном выборе — без hy2.
+        let mut cfg = pick_config(raw, &choice);
+        tune(&mut cfg);
+        cfg["inbounds"] = local_inbounds();
+        cfg["log"] = json!({"loglevel": "warning"});
+        if !ensure_geo(&app, &dir).await { strip_geo_rules(&mut cfg); }
+        let bytes = serde_json::to_vec(&cfg).unwrap();
+        std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+        if !token.is_empty() { let _ = std::fs::write(&last, &bytes); }   // запасная копия - только своя подписка, не гостевая
+    } else {
+        std::fs::copy(&last, &path).map_err(|_| "Нет связи с сервером".to_string())?;
+    }
     ("xray", vec!["run".into(), "-c".into(), path.to_string_lossy().to_string()])
     };
 
