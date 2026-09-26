@@ -199,7 +199,7 @@ pub fn cleanup_stale() {
 const SOCKS_PORT: u16 = 38808;
 pub const HTTP_PORT: u16 = 38809;
 /// 26.09: вход только для проверки пути реальной загрузкой (правило маршрута ведёт его строго в путь, см. add_probe_rule)
-const PROBE_PORT: u16 = 38810;
+pub const PROBE_PORT: u16 = 38810;
 const API_PORT: u16 = 38813;
 const PROBE_URL: &str = "https://vpn.insellers.su/probe/";
 
