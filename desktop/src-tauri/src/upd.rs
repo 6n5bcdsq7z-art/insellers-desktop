@@ -138,3 +138,92 @@ pub fn verify(data: &[u8], sig_b64: &str, pub_b64: &str) -> Result<(), String> {
     let sig = minisign_verify::Signature::decode(&dec(sig_b64)?).map_err(|e| e.to_string())?;
     pk.verify(data, &sig, true).map_err(|e| format!("подпись не сошлась: {e}"))
 }
+
+/// 27.09 (владелец, п.17): дельта-обновления Mac. Полный пакет .app.tar.gz ~68 МБ, патч от прошлой версии ~1.7 МБ.
+/// База - РАСПАКОВАННЫЙ .app.tar установленной версии (сохраняем после каждой установки, zstd). Патч (zstd --patch-from,
+/// строит сервер insellers-desktop-deltas) + база -> новый .app.tar -> проверка подписи minisign ЭТОГО tar (CI подписывает его
+/// тем же ключом Tauri, подпись - в delta.json) -> gzip -> установка плагином. Нет базы / патча / подпись не сошлась - None,
+/// и обновление идёт полным пакетом, как раньше.
+#[cfg(target_os = "macos")]
+pub mod delta {
+    use std::io::{Read, Write};
+
+    const BASE_FILE: &str = "update-base.tar.zst";
+    const BASE_META: &str = "update-base.json";
+
+    fn sha256_hex(data: &[u8]) -> String {
+        ring::digest::digest(&ring::digest::SHA256, data).as_ref().iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Сохранить базу для следующего обновления: распакованный tar (из только что проверенного пакета).
+    pub fn save_base_tar(tar: &[u8], version: &str) -> Result<(), String> {
+        let (Some(f), Some(m)) = (crate::data_path(BASE_FILE), crate::data_path(BASE_META)) else { return Err("no data dir".into()) };
+        let z = zstd::bulk::compress(tar, 3).map_err(|e| e.to_string())?;
+        let tmp = f.with_extension("tmp");
+        std::fs::write(&tmp, &z).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &f).map_err(|e| e.to_string())?;
+        let meta = serde_json::json!({"version": version, "tar_sha256": sha256_hex(tar), "tar_size": tar.len()});
+        std::fs::write(&m, meta.to_string()).map_err(|e| e.to_string())
+    }
+
+    /// База из полного пакета (.app.tar.gz) после его проверки.
+    pub fn save_base_from_tgz(tgz: &[u8], version: &str) -> Result<(), String> {
+        let mut tar = Vec::with_capacity(tgz.len() * 3);
+        flate2::read::GzDecoder::new(tgz).read_to_end(&mut tar).map_err(|e| e.to_string())?;
+        save_base_tar(&tar, version)
+    }
+
+    fn load_base() -> Option<(String, String, Vec<u8>)> {
+        let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(crate::data_path(BASE_META)?).ok()?).ok()?;
+        let z = std::fs::read(crate::data_path(BASE_FILE)?).ok()?;
+        let size = meta["tar_size"].as_u64()? as usize;
+        let tar = zstd::bulk::decompress(&z, size + 1).ok()?;
+        let sha = meta["tar_sha256"].as_str()?.to_string();
+        if sha256_hex(&tar) != sha { return None; }
+        Some((meta["version"].as_str()?.to_string(), sha, tar))
+    }
+
+    /// Готовый к установке .app.tar.gz, собранный из базы и патча (подпись проверена), или None - качать полный.
+    pub async fn try_update(download_url: &str, pubkey: &str, tunnel_ok: bool, progress: impl FnMut(u64)) -> Option<Vec<u8>> {
+        let t0 = std::time::Instant::now();
+        let (base_ver, base_sha, base_tar) = tauri::async_runtime::spawn_blocking(load_base).await.ok()??;
+        let dir = download_url.rsplit_once('/')?.0;
+        let c = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build().ok()?;
+        let dj: serde_json::Value = c.get(format!("{dir}/delta.json")).send().await.ok()?.json().await.ok()?;
+        let mac = &dj["mac"];
+        let ent = &mac["from"][base_ver.as_str()];
+        if ent["base_tar_sha256"].as_str() != Some(base_sha.as_str()) {
+            crate::remote_log("update.delta_skip", serde_json::json!({"base": base_ver, "why": "no patch for base"}));
+            return None;
+        }
+        let (sig, want_size) = (mac["tar_sig"].as_str()?.to_string(), mac["tar_size"].as_u64()? as usize);
+        let url = format!("{}{}", crate::BASE, ent["url"].as_str()?);
+        let patch = match super::fetch(&url, tunnel_ok, progress).await {
+            Ok(p) => p,
+            Err(e) => { crate::remote_log("update.delta_fail", serde_json::json!({"stage": "download", "err": e})); return None; }
+        };
+        let pk = pubkey.to_string();
+        let plen = patch.len();
+        let res = tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<u8>, Vec<u8>), String> {
+            let mut dec = zstd::stream::read::Decoder::with_ref_prefix(&patch[..], &base_tar).map_err(|e| e.to_string())?;
+            dec.window_log_max(31).map_err(|e| e.to_string())?;
+            let mut tar = Vec::with_capacity(want_size);
+            dec.read_to_end(&mut tar).map_err(|e| e.to_string())?;
+            super::verify(&tar, &sig, &pk)?;                    // подпись распакованного tar (CI, ключ Tauri)
+            let mut gz = flate2::write::GzEncoder::new(Vec::with_capacity(tar.len() / 2), flate2::Compression::fast());
+            gz.write_all(&tar).map_err(|e| e.to_string())?;
+            let tgz = gz.finish().map_err(|e| e.to_string())?;
+            Ok((tar, tgz))
+        }).await.ok()?;
+        match res {
+            Ok((tar, tgz)) => {
+                let ver = dj["version"].as_str().unwrap_or("").to_string();
+                let _ = tauri::async_runtime::spawn_blocking(move || save_base_tar(&tar, &ver)).await;
+                crate::remote_log("update.delta_ok", serde_json::json!({"from": base_ver, "patch_kb": plen / 1024,
+                    "ms": t0.elapsed().as_millis() as u64}));
+                Some(tgz)
+            }
+            Err(e) => { crate::remote_log("update.delta_fail", serde_json::json!({"stage": "apply", "err": e})); None }
+        }
+    }
+}

@@ -197,6 +197,9 @@ fn init_script(token: &str, version: &str) -> String {
 "#)
 }
 
+#[cfg(target_os = "macos")]
+const MAC_SAFARI_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15";
+
 fn build_main(app: &AppHandle) -> tauri::Result<()> {
     if let Some(w) = app.get_webview_window("main") { let _ = w.destroy(); }
     let token = load_token();
@@ -205,7 +208,12 @@ fn build_main(app: &AppHandle) -> tauri::Result<()> {
     // Окно открывается с локальной заставки (dist/index.html): «Идёт подключение» с анимацией.
     // Она ждёт, пока сервер станет доступен, и сама уходит на страницу приложения. Раньше окно
     // сразу грузило сайт — после перезагрузки без интернета оставался белый экран навсегда.
-    WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+    let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()));
+    // 27.09 (владелец, п.15 - реклама на ПК): WKWebView на Mac шлёт UA без «Version/… Safari/…» - рекламные сети считают
+    // такой браузер ненастоящим и не отдают показ (28 «nofill» из 28). Ставим UA обычного Safari той же платформы.
+    #[cfg(target_os = "macos")]
+    let builder = builder.user_agent(MAC_SAFARI_UA);
+    builder
         .title("INSELLERS VPN")
         .background_color(tauri::window::Color(0, 0, 0, 255))
         .inner_size(430.0, 880.0)
@@ -497,14 +505,28 @@ async fn check_update(app: AppHandle, manual: Option<bool>) -> Result<bool, Stri
                 let _busy = upd::BusyGuard;
                 remote_log("update.download", serde_json::json!({"v": update.version}));
                 emit(0, "download");
-                let bytes = match upd::fetch(update.download_url.as_str(), was_on, |p| emit(p, "download")).await {
-                    Ok(b) => b,
-                    Err(e) => { emit(0, "error"); remote_log("update.fail", serde_json::json!({"err": e})); return Err(e); }
-                };
                 let pubkey = app.config().plugins.0.get("updater").and_then(|u| u.get("pubkey")).and_then(|k| k.as_str()).unwrap_or("").to_string();
-                if let Err(e) = upd::verify(&bytes, &update.signature, &pubkey) {
-                    emit(0, "error"); remote_log("update.fail", serde_json::json!({"err": e})); return Err(e);
-                }
+                // 27.09 (п.17): Mac - сначала дельта (патч ~2 МБ от установленной версии, подпись tar проверена внутри)
+                #[cfg(target_os = "macos")]
+                let delta = upd::delta::try_update(update.download_url.as_str(), &pubkey, was_on, |p| emit(p, "download")).await;
+                #[cfg(not(target_os = "macos"))]
+                let delta: Option<Vec<u8>> = None;
+                let bytes = if let Some(b) = delta { b } else {
+                    let b = match upd::fetch(update.download_url.as_str(), was_on, |p| emit(p, "download")).await {
+                        Ok(b) => b,
+                        Err(e) => { emit(0, "error"); remote_log("update.fail", serde_json::json!({"err": e})); return Err(e); }
+                    };
+                    if let Err(e) = upd::verify(&b, &update.signature, &pubkey) {
+                        emit(0, "error"); remote_log("update.fail", serde_json::json!({"err": e})); return Err(e);
+                    }
+                    // база для следующего дельта-обновления (распакованный tar этой версии)
+                    #[cfg(target_os = "macos")]
+                    {
+                        let (bc, v) = (b.clone(), update.version.clone());
+                        let _ = tauri::async_runtime::spawn_blocking(move || upd::delta::save_base_from_tgz(&bc, &v)).await;
+                    }
+                    b
+                };
                 emit(100, "install");
                 if let Err(e) = update.install(&bytes) { emit(0, "error"); return Err(e.to_string()); }
                 if was_on { if let Some(p) = data_path("resume") { let _ = std::fs::write(p, "1"); } }
