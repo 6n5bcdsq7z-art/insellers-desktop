@@ -693,6 +693,13 @@ async fn xray_candidates(app: &AppHandle, client: &reqwest::Client, url: &str, o
     let mut raw_cands: Vec<Value> = Vec::new();
     let fetched = if offline { None } else {
         match client.get(url).send().await {
+            // 27.09 (владелец): сервер (центр диагностики) видит, что ручной протокол у провайдера человека виснет (>= 50%) -
+            // сразу «Автовыбор» на 15 мин с объяснением; через 15 мин - снова спросим сервер (путь ожил - вернётся выбор)
+            Ok(r) if manual_choice(choice) && r.headers().get("x-ins-manual").and_then(|v| v.to_str().ok()) == Some("bad") => {
+                TEMP_AUTO_UNTIL.store(crate::now_ms() + 15 * 60 * 1000, std::sync::atomic::Ordering::SeqCst);
+                crate::remote_log("vpn.manual_bad", json!({"manual": manual_name(choice)}));
+                return Err(format!("RETRY_AUTO_BAD:{}", manual_name(choice)));
+            }
             Ok(r) => Some(r.text().await.map_err(|e| e.to_string())?),
             Err(_) if fresh_last(last) => None,           // сервер подписок не ответил - сохранённая конфигурация
             Err(_) => return Err("Сервер подписок недоступен".to_string()),
@@ -947,6 +954,17 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
             if r.is_ok() {
                 let m = format!("Выбранный протокол («{name}») сейчас не работает в Вашей сети - временно подключили через «Автовыбор»");
                 *CONNECT_MSG.lock().unwrap() = m.clone();   // кнопка «Подключить» (main.rs) покажет его вместо пустого
+                notify(&app, "connected", &m);
+            }
+            r
+        }
+        Err(e) if e.starts_with("RETRY_AUTO_BAD:") => {
+            let name = e.trim_start_matches("RETRY_AUTO_BAD:").to_string();
+            notify(&app, "connecting", "Подключаем через «Автовыбор»…");
+            let r = start_once(app.clone()).await;
+            if r.is_ok() {
+                let m = format!("Ваш выбор («{name}») не работает в этой сети - подключили через «Автовыбор»");
+                *CONNECT_MSG.lock().unwrap() = m.clone();
                 notify(&app, "connected", &m);
             }
             r
