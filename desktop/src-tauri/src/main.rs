@@ -150,6 +150,20 @@ pub fn remote_log(ev: &str, data: serde_json::Value) {
     });
 }
 
+/// 27.09 (tasks/0000c): срок доступа (мс) со страницы - трей показывает остаток, а не только скорость. 0 - неизвестно.
+static ACCESS_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn access_left_text() -> String {
+    let until = ACCESS_UNTIL.load(std::sync::atomic::Ordering::Relaxed);
+    if until == 0 { return String::new(); }
+    let now = now_ms();
+    if until <= now { return "только Telegram".to_string(); }
+    let left = (until - now) / 1000;
+    if left >= 86_400 { format!("осталось {} дн.", left / 86_400) }
+    else if left >= 3_600 { format!("осталось {} ч {} мин", left / 3_600, left % 3_600 / 60) }
+    else { format!("осталось {} мин", (left / 60).max(1)) }
+}
+
 /// Мост для страницы: те же методы, что у Android (window.InsellersNative).
 fn init_script(token: &str, version: &str) -> String {
     let tok = serde_json::to_string(token).unwrap_or_else(|_| "\"\"".into());
@@ -191,7 +205,8 @@ fn init_script(token: &str, version: &str) -> String {
     hasAwg: function () {{ return true; }},
     connectGuest: function (u, t) {{ inv("vpn_guest", {{ url: String(u), until: String(t) }}); }},
     getGuestUntil: function () {{ var g = +window.__INS_GUEST_UNTIL || 0; return String(g > Date.now() ? g : 0); }},
-    getVpnState: function () {{ return window.__INS_VPN || "disconnected"; }}
+    getVpnState: function () {{ return window.__INS_VPN || "disconnected"; }},
+    setAccessUntil: function (ms) {{ inv("set_access", {{ ms: String(ms) }}); }}
   }};
 }})();
 "#)
@@ -332,11 +347,15 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             if let Some(w) = h.get_webview_window("main") { let _ = w.eval(&format!("window.__INS_BYTES={session_bytes}")); }
             let (down, up) = (fmt_rate(rx as f64 / 2.0), fmt_rate(tx as f64 / 2.0));
             if let Some(items) = h.try_state::<TrayItems>() {
-                let st = if on { format!("Подключено · ↓ {down}  ↑ {up}") } else { "Не подключено".to_string() };
+                let al = access_left_text();
+                let st = if on { if al.is_empty() { format!("Подключено · ↓ {down}  ↑ {up}") } else { format!("Подключено · {al} · ↓ {down}  ↑ {up}") } }
+                         else { "Не подключено".to_string() };
                 let _ = items.status.set_text(if upd_ready { format!("⬆ Вышло обновление! · {st}") } else { st });
                 let _ = items.toggle.set_text(if on { "Отключить" } else { "Подключить" });
             }
-            let _ = tray.set_tooltip(Some(if on { format!("INSELLERS VPN - защищено\n↓ {down}   ↑ {up}") } else { "INSELLERS VPN - не подключено".to_string() }));
+            let al = access_left_text();
+            let _ = tray.set_tooltip(Some(if on { format!("INSELLERS VPN - защищено{}\n↓ {down}   ↑ {up}", if al.is_empty() { String::new() } else { format!(" · {al}") }) }
+                                         else { "INSELLERS VPN - не подключено".to_string() }));
             #[cfg(target_os = "macos")]
             {
                 let t = if on { format!("↓{down} ↑{up}") } else { String::new() };
@@ -370,6 +389,7 @@ async fn native_cmd(app: AppHandle, cmd: &str, arg: serde_json::Value) {
         }
         "vpn_disconnect" => vpn_disconnect(app),
         "set_pref" => set_pref(&app, arg["key"].as_str().unwrap_or_default(), arg["value"].as_bool().unwrap_or(false)),
+        "set_access" => ACCESS_UNTIL.store(arg["ms"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0), std::sync::atomic::Ordering::Relaxed),
         _ => {}
     }
 }
