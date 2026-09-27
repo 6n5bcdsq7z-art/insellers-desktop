@@ -201,6 +201,8 @@ pub const HTTP_PORT: u16 = 38809;
 /// 26.09: вход только для проверки пути реальной загрузкой (правило маршрута ведёт его строго в путь, см. add_probe_rule)
 pub const PROBE_PORT: u16 = 38810;
 const API_PORT: u16 = 38813;
+/// 27.09 (п.5): счётчики трафика ядра по выходам (xray metrics, /debug/vars) - мгновенное обнаружение заморозки
+const METRICS_PORT: u16 = 38814;
 const PROBE_URL: &str = "https://vpn.insellers.su/probe/";
 
 #[derive(Default)]
@@ -476,6 +478,10 @@ fn is_bad(tag: &str) -> bool {
 fn set_cur_path(tag: &str) { *CUR_PATH.lock().unwrap() = tag.to_string(); }
 fn cur_path() -> String { CUR_PATH.lock().unwrap().clone() }
 static CUR_DESC: Mutex<String> = Mutex::new(String::new());
+/// этап 7: выход, на который переключили балансировщик через API (общий для медленной проверки и быстрого сторожа)
+static HOT_CUR: Mutex<String> = Mutex::new(String::new());
+/// 27.09 (п.5): выходы, замёрзшие недавно (тег, до какого момента не брать)
+static HOT_BAD: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
 fn set_cur_desc(d: &str) { *CUR_DESC.lock().unwrap() = d.to_string(); }
 fn cur_desc() -> String { CUR_DESC.lock().unwrap().clone() }
 fn manual_choice(choice: &str) -> bool { choice == "reality" || choice == "xhttp" || choice == "hysteria2" || choice.starts_with("cfg:") }
@@ -502,6 +508,13 @@ fn add_probe_rule(cfg: &mut Value) {
                else { json!({"type": "field", "inboundTag": ["probe-in"], "outboundTag": main}) };
     if !cfg["routing"].is_object() { cfg["routing"] = json!({}); }
     cfg["api"] = json!({"tag": "api", "services": ["RoutingService"]});   // этап 7: xray api bo
+    // 27.09 (п.5): счётчики по выходам для быстрого сторожа заморозки (только 127.0.0.1)
+    cfg["stats"] = json!({});
+    if !cfg["policy"].is_object() { cfg["policy"] = json!({}); }
+    if !cfg["policy"]["system"].is_object() { cfg["policy"]["system"] = json!({}); }
+    cfg["policy"]["system"]["statsOutboundUplink"] = json!(true);
+    cfg["policy"]["system"]["statsOutboundDownlink"] = json!(true);
+    cfg["metrics"] = json!({"tag": "metrics", "listen": format!("127.0.0.1:{METRICS_PORT}")});
     let old = cfg["routing"]["rules"].as_array().cloned().unwrap_or_default();
     let mut rules = vec![json!({"type": "field", "inboundTag": ["api-in"], "outboundTag": "api"}), rule];
     rules.extend(old);
@@ -516,25 +529,108 @@ async fn hot_switch(app: &AppHandle, dir: &PathBuf, cur: &str) -> Option<String>
     let bal = cfg.pointer("/routing/balancers/0/tag").and_then(|v| v.as_str())?.to_string();
     let tags: Vec<String> = cfg["outbounds"].as_array()?.iter()
         .filter_map(|o| o["tag"].as_str().map(|t| t.to_string()))
-        .filter(|t| (t == "proxy" || t.starts_with("srv:")) && t != cur)
+        .filter(|t| (t == "proxy" || t.starts_with("srv:")) && t != cur && !hot_bad(t))
         .collect();
     for t in tags {
         let args: Vec<String> = vec!["api".into(), "bo".into(), format!("--server=127.0.0.1:{API_PORT}"), "-b".into(), bal.clone(), t.clone()];
         let out = app.shell().sidecar("xray").ok()?.args(args).output().await.ok()?;
         if !out.status.success() { return None; }
-        if probe_real("32k").await.0 { return Some(t); }
+        if probe_real_t("32k", 4).await.0 { return Some(t); }   // 27.09: проверка после переключения - 4 с, не 15
+        hot_mark_bad(&t, 60_000);
     }
     None
 }
 
+fn hot_bad(t: &str) -> bool {
+    let now = crate::now_ms();
+    let mut b = HOT_BAD.lock().unwrap();
+    b.retain(|(_, until)| *until > now);
+    b.iter().any(|(x, _)| x == t)
+}
+
+fn hot_mark_bad(t: &str, ms: u64) {
+    let mut b = HOT_BAD.lock().unwrap();
+    b.retain(|(x, _)| x != t);
+    b.push((t.to_string(), crate::now_ms() + ms));
+}
+
+/// 27.09 (владелец, п.5): быстрый сторож заморозки. Раз в секунду - счётчики ядра по выходам (proxy, srv:*).
+/// ЗАМОРОЗКА = 2 с подряд приходит < 1,5 КБ/с, а запросы уходят (> 300 Б/с), и до этого за 5 с пришло >= 30 КБ (или за эти
+/// 2 с ушло 2-60 КБ запросов; крупная отправка - не заморозка). Реакция - сразу следующий выход балансировщика через API ядра
+/// (без перезапуска), проверка 32 КБ уже после переключения; не прошёл - следующий. Замёрзший не берём 2 мин.
+fn freeze_now(hist: &std::collections::VecDeque<(u64, u64)>) -> bool {
+    let n = hist.len();
+    if n < 2 { return false; }
+    let last2: Vec<&(u64, u64)> = hist.iter().skip(n - 2).collect();
+    if !last2.iter().all(|(rx, tx)| *rx < 1_500 && *tx > 300) { return false; }
+    let before: u64 = hist.iter().take(n - 2).rev().take(5).map(|(rx, _)| *rx).sum();
+    let tx2: u64 = last2.iter().map(|(_, tx)| *tx).sum();
+    before >= 30_000 || (2_000..=60_000).contains(&tx2)
+}
+
+async fn freeze_watch(app: AppHandle, dir: PathBuf, gen: u32) {
+    let client = match reqwest::Client::builder().no_proxy().timeout(Duration::from_millis(800)).build() { Ok(c) => c, Err(_) => return };
+    let url = format!("http://127.0.0.1:{METRICS_PORT}/debug/vars");
+    let mut prev: Option<(u64, u64)> = None;
+    let mut hist: std::collections::VecDeque<(u64, u64)> = std::collections::VecDeque::new();
+    let mut stall_since = 0u64;
+    let mut last_switch = 0u64;
+    crate::tokio_sleep(10).await;
+    loop {
+        tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_millis(1000))).await.ok();
+        if cur_gen(&app) != gen || !wanted(&app) { break; }
+        let v: Value = match client.get(&url).send().await {
+            Ok(r) => r.json().await.unwrap_or(Value::Null),
+            Err(_) => { prev = None; hist.clear(); continue; }        // ядро перезапускается / без metrics (старый конфиг)
+        };
+        let (mut up, mut down) = (0u64, 0u64);
+        if let Some(o) = v.pointer("/stats/outbound").and_then(|x| x.as_object()) {
+            for (tag, c) in o {
+                if tag == "proxy" || tag.starts_with("srv:") {
+                    up += c["uplink"].as_u64().unwrap_or(0);
+                    down += c["downlink"].as_u64().unwrap_or(0);
+                }
+            }
+        } else { prev = None; continue; }
+        let now = crate::now_ms();
+        if let Some((pu, pd)) = prev {
+            if up < pu || down < pd { hist.clear(); }                 // новое ядро - счётчики с нуля
+            else {
+                let (d_rx, d_tx) = (down - pd, up - pu);
+                hist.push_back((d_rx, d_tx));
+                while hist.len() > 8 { hist.pop_front(); }
+                if d_rx < 1_500 && d_tx > 300 { if stall_since == 0 { stall_since = now.saturating_sub(1000); } } else { stall_since = 0; }
+            }
+        }
+        prev = Some((up, down));
+        if freeze_now(&hist) && now.saturating_sub(last_switch) > 4_000 {
+            let t0 = if stall_since > 0 { stall_since } else { now };
+            let cur = { let c = HOT_CUR.lock().unwrap().clone(); if c.is_empty() { "proxy".to_string() } else { c } };
+            hot_mark_bad(&cur, 120_000);
+            let from = cur_desc();
+            if let Some(to) = hot_switch(&app, &dir, &cur).await {
+                *HOT_CUR.lock().unwrap() = to.clone();
+                crate::remote_log("vpn.hot_switch", json!({"from": from, "to": to, "how": "freeze",
+                    "detect_ms": crate::now_ms().saturating_sub(t0), "gap_ms": crate::now_ms().saturating_sub(t0)}));
+            } else {
+                crate::remote_log("vpn.freeze", json!({"from": from, "cur": cur, "switched": false}));
+            }
+            last_switch = crate::now_ms();
+            hist.clear(); stall_since = 0; prev = None;
+        }
+    }
+}
+
 /// Скачать `size` (256k | 32k) с нашего сервера ЧЕРЕЗ путь (вход probe-in): (ok, байт, мс, причина отказа:
 /// core - ядро не слушает, timeout, short - оборвалось на середине = заморозка оператором, http <код>, io). До ~15 с.
-async fn probe_real(size: &str) -> (bool, u64, u64, String) {
+async fn probe_real(size: &str) -> (bool, u64, u64, String) { probe_real_t(size, 15).await }
+
+async fn probe_real_t(size: &str, secs: u64) -> (bool, u64, u64, String) {
     let want: u64 = if size == "32k" { 32_768 } else { 262_144 };
     let t0 = std::time::Instant::now();
     let ms = |t: std::time::Instant| t.elapsed().as_millis() as u64;
     let client = match reqwest::Proxy::all(format!("http://127.0.0.1:{PROBE_PORT}"))
-        .and_then(|p| reqwest::Client::builder().proxy(p).timeout(Duration::from_secs(15)).build()) {
+        .and_then(|p| reqwest::Client::builder().proxy(p).timeout(Duration::from_secs(secs)).build()) {
         Ok(c) => c, Err(_) => return (false, 0, 0, "io".into()),
     };
     let url = format!("{PROBE_URL}{size}?r={}", crate::now_ms());
@@ -1134,6 +1230,14 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         }
     });
 
+    // 6а) 27.09 (п.5): быстрый сторож заморозки - счётчики ядра раз в секунду, мгновенное переключение пути
+    {
+        let (fa, fd) = (app.clone(), dir.clone());
+        tauri::async_runtime::spawn(async move { freeze_watch(fa, fd, watch_gen).await; });
+    }
+    *HOT_CUR.lock().unwrap() = String::new();
+    HOT_BAD.lock().unwrap().clear();
+
     // 6) честный статус и проверка пути (26.09 этап 2). Раз в 30 с - дешёвый 204 через туннель (признак); раз в 150 с и
     // сразу при отказе 204 - РЕАЛЬНАЯ загрузка 256 КБ с нашего сервера через путь (204 проходит и по «замороженному»
     // оператором пути). Два отказа загрузки подряд при работающем интернете без VPN = путь мёртв: при «Автовыборе» -
@@ -1154,7 +1258,6 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         let mut n = 0u32;
         let mut last_ok_log = 0u64;
         let mut manual_warned = 0u64;
-        let mut hot_cur = String::new();   // этап 7: выход, на который переключили балансировщик через API
         loop {
             if cur_gen(&h) != watch_gen || !wanted(&h) { break; }
             let mut ok = false;
@@ -1289,10 +1392,10 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                             degraded = true; mark(&h, 2);
                             notify(&h, "degraded", "Выбранный протокол сейчас не пропускает трафик - включите «Автовыбор» в настройках");
                         }
-                    } else if let Some(to) = { let t0 = crate::now_ms(); hot_switch(&h, &h_dir, &hot_cur).await.map(|t| (t, t0)) } {
+                    } else if let Some(to) = { let t0 = crate::now_ms(); let hc = HOT_CUR.lock().unwrap().clone(); hot_switch(&h, &h_dir, &hc).await.map(|t| (t, t0)) } {
                         // этап 7: без перезапуска ядра
                         crate::remote_log("vpn.hot_switch", json!({"from": dead_desc, "to": to.0, "gap_ms": crate::now_ms().saturating_sub(to.1)}));
-                        hot_cur = to.0;
+                        *HOT_CUR.lock().unwrap() = to.0;
                         fails = 0;
                         if degraded { degraded = false; }
                         notify(&h, "connected", "Соединение восстановлено");
