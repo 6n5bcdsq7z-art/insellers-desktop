@@ -366,10 +366,29 @@ async fn native_cmd(app: AppHandle, cmd: &str, arg: serde_json::Value) {
     }
 }
 
+/// Код перехода «INSELLERS-INVITE:<код>» из буфера обмена - системной командой (без лишних зависимостей).
+fn invite_from_clipboard() -> String {
+    #[cfg(target_os = "macos")]
+    let out = std::process::Command::new("pbpaste").output();
+    #[cfg(target_os = "windows")]
+    let out = {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard"])
+            .creation_flags(0x0800_0000).output()                 // CREATE_NO_WINDOW - без мигающего окна
+    };
+    #[cfg(target_os = "linux")]
+    let out = std::process::Command::new("sh").args(["-c", "wl-paste -n 2>/dev/null || xclip -o -selection clipboard 2>/dev/null"]).output();
+    let t = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    match t.strip_prefix("INSELLERS-INVITE:") { Some(c) if c.len() < 64 => c.to_string(), _ => String::new() }
+}
+
 #[tauri::command]
 async fn login(app: AppHandle) -> Result<(), String> {
     let client = reqwest::Client::builder().timeout(Duration::from_secs(15)).build().map_err(|e| e.to_string())?;
-    let r: serde_json::Value = client.post(format!("{BASE}/api/app/login/start")).send().await
+    // 27.09 (владелец): приглашение засчитывается по коду со страницы /i/<uid> (буфер обмена), IP - только подтверждение
+    let invite = tauri::async_runtime::spawn_blocking(invite_from_clipboard).await.unwrap_or_default();
+    let body = if invite.is_empty() { serde_json::json!({}) } else { serde_json::json!({"invite": invite}) };
+    let r: serde_json::Value = client.post(format!("{BASE}/api/app/login/start")).json(&body).send().await
         .map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
     let nonce = r["nonce"].as_str().unwrap_or_default().to_string();
     let link = r["bot_link"].as_str().unwrap_or_default().to_string();
