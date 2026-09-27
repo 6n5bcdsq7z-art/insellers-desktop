@@ -78,7 +78,7 @@ jobs:
         run: |
           set -e
           mkdir -p src-tauri/binaries && cd src-tauri/binaries
-          base=https://github.com/XTLS/Xray-core/releases/latest/download
+          base=https://github.com/XTLS/Xray-core/releases/download/v26.3.27   # 27.09: закреплено (было latest) - Go 1.27 (26.9.x) даёт #6797
           if [ "$RUNNER_OS" = "Windows" ]; then
             curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o x.zip $base/Xray-windows-64.zip && unzip -o -q x.zip xray.exe && mv xray.exe xray-x86_64-pc-windows-msvc.exe
           elif [ "$RUNNER_OS" = "Linux" ]; then
@@ -137,6 +137,21 @@ jobs:
         run: |
           set -o pipefail
           npx tauri build ${{ matrix.args }} 2>&1 | tee ../build-${{ matrix.os }}.log
+      - name: Подпись распакованного .app.tar (дельта-обновления Mac, 27.09)
+        # Приложение собирает новый .app.tar из своей базы и патча (~2 МБ вместо ~68 МБ) и проверяет ЭТУ подпись тем же
+        # ключом Tauri. Не вышло - сборка не ломается: людям уйдёт только полный пакет, как раньше.
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -e
+          T=$(find src-tauri/target -path '*/bundle/*' -name '*.app.tar.gz' | head -1)
+          [ -n "$T" ] || { echo "нет .app.tar.gz"; exit 0; }
+          gunzip -c "$T" > "${T%.gz}"
+          npx tauri signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "${T%.gz}" > /dev/null
+          ls -la "${T%.gz}.sig"; rm -f "${T%.gz}"
       - name: Лог ошибки → ветка ci-logs (чтобы разбирать без доступа к Actions UI)
         if: failure()
         env:
@@ -157,7 +172,7 @@ jobs:
       - name: Собрать файлы
         run: |
           mkdir -p ../out
-          find src-tauri/target -path '*/bundle/*' \( -name '*-setup.exe' -o -name '*-setup.exe.sig' -o -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' -o -name '*.AppImage' -o -name '*.AppImage.sig' -o -name '*.deb' \) -exec cp {} ../out/ \;
+          find src-tauri/target -path '*/bundle/*' \( -name '*-setup.exe' -o -name '*-setup.exe.sig' -o -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' -o -name '*.app.tar.sig' -o -name '*.AppImage' -o -name '*.AppImage.sig' -o -name '*.deb' \) -exec cp {} ../out/ \;
           ls -la ../out
       - uses: actions/upload-artifact@v4
         with:
@@ -200,6 +215,8 @@ jobs:
           up "$WIN" "INSELLERS-VPN-setup.exe" > ../up1.log 2>&1 &
           up "$DMG" "INSELLERS-VPN.dmg" > ../up2.log 2>&1 &
           up "$MACTGZ" "INSELLERS-VPN-mac.app.tar.gz" > ../up3.log 2>&1 &
+          MACTARSIG=$(ls *.app.tar.sig 2>/dev/null | head -1)   # 27.09: подпись распакованного tar - для дельта-обновлений
+          [ -n "$MACTARSIG" ] && { up "$MACTARSIG" "INSELLERS-VPN-mac.app.tar.sig" > ../up6.log 2>&1 & }
           [ -n "$APPIMG" ] && { up "$APPIMG" "INSELLERS-VPN.AppImage" > ../up4.log 2>&1 & }
           [ -n "$DEB" ] && { up "$DEB" "INSELLERS-VPN.deb" > ../up5.log 2>&1 & }
           fail=0; for j in $(jobs -p); do wait $j || fail=1; done
