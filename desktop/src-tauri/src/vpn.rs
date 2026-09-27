@@ -252,7 +252,8 @@ fn arm_guest_timer(app: &AppHandle, until: u64) {
 /// Выбор протокола в мини-аппе (auto / reality / xhttp / hysteria2); не узнали — "".
 /// AmneziaWG на этом устройстве не проходит (26.09): ключ получили, а трафик через wireproxy не идёт - 6 часов AWG здесь
 /// не пробуем, подключаемся через Xray (как Android). Отметка - файл awg_off (время в мс) в папке данных.
-const AWG_OFF_MS: u64 = 6 * 3600 * 1000;
+// 27.09 (tasks/0000b): AmneziaWG - умолчание; не пошёл - Xray на 30 мин, потом снова пробуем AWG (было 6 ч)
+const AWG_OFF_MS: u64 = 30 * 60 * 1000;
 fn awg_off(dir: &PathBuf) -> bool {
     std::fs::read_to_string(dir.join("awg_off")).ok().and_then(|t| t.trim().parse::<u64>().ok())
         .map(|t| crate::now_ms().saturating_sub(t) < AWG_OFF_MS).unwrap_or(false)
@@ -288,6 +289,20 @@ async fn awg_conf(client: &reqwest::Client, token: &str) -> Result<String, Strin
         _ => return Err("AmneziaWG сейчас недоступен - выберите другой протокол".into()),
     }
     let v: Value = r.json().await.map_err(|_| "AmneziaWG: неверный ответ сервера".to_string())?;
+    awg_text(&v)
+}
+
+/// 27.09 (tasks/0000b): AmneziaWG гостю до входа - пир по hwid и гостевой подписке, сервер держит его в ограниченном режиме.
+async fn awg_conf_guest(client: &reqwest::Client, sub: &str) -> Result<String, String> {
+    let r = client.post(format!("{}/api/app/awg/guest", crate::BASE))
+        .json(&json!({"hwid": format!("ins-{}", crate::install_id()), "sub": sub, "caps": ["awg31"]})).send().await
+        .map_err(|_| "Сервер AmneziaWG недоступен".to_string())?;
+    if !r.status().is_success() { return Err(format!("AmneziaWG до входа недоступен ({})", r.status().as_u16())); }
+    let v: Value = r.json().await.map_err(|_| "AmneziaWG: неверный ответ сервера".to_string())?;
+    awg_text(&v)
+}
+
+fn awg_text(v: &Value) -> Result<String, String> {
     let c = &v["config"];
     let s = |k: &str| c[k].as_str().unwrap_or("").to_string();
     if s("private_key").is_empty() || s("server_pubkey").is_empty() || s("endpoint").is_empty() {
@@ -320,7 +335,10 @@ async fn transport_choice(client: &reqwest::Client, token: &str) -> String {
         // режим продления (26.09): сервер отдаёт grace=true - AmneziaWG в нём не пускается, берём Xray «только Telegram»
         // (как при «Автовыборе»); после ролика/оплаты grace=false - при следующем подключении снова выбранный протокол
         Ok(r) => r.json::<Value>().await.ok().map(|v| {
-            if v["grace"].as_bool().unwrap_or(false) { String::new() } else { v["choice"].as_str().unwrap_or("").to_string() }
+            // 27.09 (tasks/0000b): «Автовыбор» = то, что предлагает сервер (effective: AmneziaWG у всех, кроме операторов, где он
+            // массово не работает); AmneziaWG и в ограниченном режиме - «только Telegram» для него держит сервер
+            let c = v["choice"].as_str().unwrap_or("").to_string();
+            if (c.is_empty() || c == "auto") && v["effective"].as_str() == Some("amneziawg") { "amneziawg".to_string() } else { c }
         }).unwrap_or_default(),
         Err(_) => String::new(),
     }
@@ -803,7 +821,7 @@ async fn link_ok() -> bool {
     let t0 = std::time::Instant::now();
     tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_millis(700))).await.ok();
     while t0.elapsed() < Duration::from_secs(9) {
-        for u in ["http://cp.cloudflare.com/generate_204", "http://connectivitycheck.gstatic.com/generate_204"] {
+        for u in ["http://cp.cloudflare.com/generate_204", "http://connectivitycheck.gstatic.com/generate_204", "https://vpn.insellers.su/probe/204"] {
             if let Ok(r) = client.get(u).send().await {
                 let s = r.status().as_u16();
                 if s == 204 || s == 200 { return true; }
@@ -991,6 +1009,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     let token = crate::load_token();
     let guest = crate::guest_load();
     if token.is_empty() && guest.is_none() { return Err("Войдите через Telegram".into()); }
+    let guest_sub0: Option<String> = guest.as_ref().map(|(u, _)| u.rsplit('/').next().unwrap_or("").to_string());
     let client = http()?;
     let dir = data_dir(&app)?;
     // 26.09: последняя рабочая конфигурация. Если наш сервер напрямую недоступен (сеть режет vpn.insellers.su или Мак
@@ -1025,8 +1044,11 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     // Протокол выбирают на уровне аккаунта: «AmneziaWG» с телефона приходит и сюда. Не получили ключ AWG (нет доступа,
     // лимит, сервер AWG недоступен) - подключаемся через Xray как при «Автовыборе», а не отказываем (26.09: раньше Мак
     // переставал подключаться из-за выбора на телефоне)
-    let awg_path = if choice == "amneziawg" && !token.is_empty() && !awg_off(&dir) {
-        match awg_conf(&client, &token).await {
+    // гость без входа (ограниченный режим) - тоже сначала AmneziaWG (27.09)
+    let guest_sub = if token.is_empty() { guest_sub0.clone() } else { None };
+    let awg_path = if (choice == "amneziawg" || guest_sub.is_some()) && !awg_off(&dir) && (!token.is_empty() || guest_sub.is_some()) {
+        let got = if token.is_empty() { awg_conf_guest(&client, guest_sub.as_deref().unwrap_or("")).await } else { awg_conf(&client, &token).await };
+        match got {
             Ok(conf) => {
                 let p = dir.join("awg.conf");
                 std::fs::write(&p, conf).map_err(|e| e.to_string())?;
@@ -1279,7 +1301,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         loop {
             if cur_gen(&h) != watch_gen || !wanted(&h) { break; }
             let mut ok = false;
-            for u in ["http://cp.cloudflare.com/generate_204", "http://connectivitycheck.gstatic.com/generate_204"] {
+            for u in ["http://cp.cloudflare.com/generate_204", "http://connectivitycheck.gstatic.com/generate_204", "https://vpn.insellers.su/probe/204"] {
                 if let Ok(r) = client.get(u).send().await {
                     let s = r.status().as_u16();
                     if s == 204 || s == 200 { ok = true; break; }
