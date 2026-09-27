@@ -61,7 +61,8 @@ fn save_token(t: &str) -> (bool, bool) {
 /// VPN до входа (ограниченный режим - только Telegram, чтобы зайти в Telegram и войти): ссылку выдаёт сервер (POST /api/app/guest — делает страница),
 /// здесь только храним её со сроком (мс по часам этого компьютера) и проверяем.
 const GUEST_PREFIX: &str = "https://direct.insellers.su/vpn/";
-const GUEST_MAX_MS: u64 = 15 * 60_000;
+// 27.09 (владелец, tasks/0000): ограниченный режим БЕССРОЧНЫЙ - срок страницы не проверяем, ссылка действует, пока её не отзовут
+const GUEST_MAX_MS: u64 = 31 * 86_400_000;
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
@@ -74,9 +75,8 @@ pub fn guest_load() -> Option<(String, u64)> {
     let t = std::fs::read_to_string(data_path("guest.json")?).ok()?;
     let v: serde_json::Value = serde_json::from_str(&t).ok()?;
     let url = v["url"].as_str()?.to_string();
-    let until = v["until"].as_u64()?;
-    let now = now_ms();
-    if guest_valid(&url) && until > now && until <= now + GUEST_MAX_MS { Some((url, until)) } else { None }
+    let _ = v["until"].as_u64();
+    if guest_valid(&url) { Some((url, now_ms() + GUEST_MAX_MS)) } else { None }
 }
 fn guest_save(url: &str, until: u64) {
     if let Some(p) = data_path("guest.json") { write_private(&p, &serde_json::json!({"url": url, "until": until}).to_string()); }
@@ -360,9 +360,9 @@ async fn native_cmd(app: AppHandle, cmd: &str, arg: serde_json::Value) {
         "vpn_connect" => { let _ = vpn_connect(app).await; }
         "vpn_guest" => {
             let url = arg["url"].as_str().unwrap_or_default().to_string();
-            let until: u64 = arg["until"].as_str().and_then(|x| x.parse().ok()).unwrap_or(0);
-            let now = now_ms();
-            if guest_valid(&url) && until > now && until <= now + GUEST_MAX_MS {
+            let until = now_ms() + GUEST_MAX_MS;
+            if !guest_valid(&url) { crate::remote_log("guest.reject", serde_json::json!({"why": "url", "len": url.len()})); }
+            if guest_valid(&url) {
                 guest_save(&url, until);
                 if let Some(w) = app.get_webview_window("main") { let _ = w.eval(&format!("window.__INS_GUEST_UNTIL={until}")); }
                 let _ = vpn_connect(app).await;
