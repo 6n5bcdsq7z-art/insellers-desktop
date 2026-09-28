@@ -478,6 +478,7 @@ pub(crate) async fn sub_url(client: &reqwest::Client, token: &str) -> Result<Str
         match client.get(format!("{}/api/app/sub", base)).header("X-App-Token", token)
             .timeout(Duration::from_secs(8)).send().await {
             Ok(r) if r.status().is_server_error() => continue,   // 26.09: 502 на рестарте сервера - повтор, а не «ответил неверно»
+            Ok(r) if *base == crate::BASE_ALT && !r.status().is_success() && r.status().as_u16() != 401 => continue,   // запасной ещё не настроен
             Ok(r) => { resp = Some(r); break; }
             Err(_) => continue,
         }
