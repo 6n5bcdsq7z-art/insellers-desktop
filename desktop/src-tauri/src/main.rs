@@ -15,6 +15,8 @@ use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 
 pub const BASE: &str = "https://vpn.insellers.su";
+/// 29.09: запасной адрес бэкенда - через NL-2 (nginx n2.insellers.su /api/app/ -> Hetzner по WG)
+pub const BASE_ALT: &str = "https://n2.insellers.su";
 const HOST: &str = "vpn.insellers.su";
 
 fn keyring_entry() -> Option<keyring::Entry> {

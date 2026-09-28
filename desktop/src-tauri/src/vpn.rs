@@ -471,9 +471,11 @@ pub(crate) async fn sub_url(client: &reqwest::Client, token: &str) -> Result<Str
     // 26.09: сразу после закрытия другого VPN (Happ в режиме TUN) сеть на Маке пару секунд «висит» - один запрос на 20 с
     // давал «Нет связи с сервером», хотя повтор через 6 с проходил за 2 с. Теперь 3 попытки по 8 с с паузой 2 с.
     let mut resp = None;
-    for i in 0..3 {
+    // 29.09 (владелец: на Маке постоянно «по сохранённым настройкам»): вторая попытка - через NL-2 (n2.insellers.su -> тот же
+    // бэкенд по WG): если оператор режет адрес NL-1, свежие настройки придут другим путём
+    for (i, base) in [crate::BASE, crate::BASE_ALT, crate::BASE].iter().enumerate() {
         if i > 0 { crate::tokio_sleep(2).await; }
-        match client.get(format!("{}/api/app/sub", crate::BASE)).header("X-App-Token", token)
+        match client.get(format!("{}/api/app/sub", base)).header("X-App-Token", token)
             .timeout(Duration::from_secs(8)).send().await {
             Ok(r) if r.status().is_server_error() => continue,   // 26.09: 502 на рестарте сервера - повтор, а не «ответил неверно»
             Ok(r) => { resp = Some(r); break; }
@@ -494,6 +496,8 @@ fn wanted(app: &AppHandle) -> bool {
 
 // ---- проверка путей (26.09) ----
 static BAD_PATHS: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
+/// 29.09: когда в последний раз забирали подписку через туннель (переподключение на свежие настройки - не чаще раза в 30 мин)
+static LAST_REFRESH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static CUR_PATH: Mutex<String> = Mutex::new(String::new());
 fn mark_bad(tag: &str) {
     if tag.is_empty() { return; }
@@ -721,7 +725,11 @@ fn single_from(c: &Value, main: &Value) -> Value {
 async fn xray_candidates(app: &AppHandle, client: &reqwest::Client, url: &str, offline: bool, choice: &str,
                          dir: &PathBuf, last: &PathBuf) -> Result<Vec<(String, Value)>, String> {
     let mut raw_cands: Vec<Value> = Vec::new();
-    let fetched = if offline { None } else {
+    // 29.09: свежая подписка, забранная через туннель (см. h_refresh), - вместо старой сохранённой конфигурации, до 2 ч
+    let fresh = dir.join("sub.fresh.json");
+    let fresh_ok = std::fs::metadata(&fresh).ok().and_then(|m| m.modified().ok())
+        .map(|t| t.elapsed().map(|e| e.as_secs() < 2 * 3600).unwrap_or(false)).unwrap_or(false);
+    let fetched = if offline { if fresh_ok { std::fs::read_to_string(&fresh).ok() } else { None } } else {
         match client.get(url).send().await {
             // 27.09 (владелец): сервер (центр диагностики) видит, что ручной протокол у провайдера человека виснет (>= 50%) -
             // сразу «Автовыбор» на 15 мин с объяснением; через 15 мин - снова спросим сервер (путь ожил - вернётся выбор)
@@ -1101,7 +1109,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     };
     let offline = url.is_empty();   // сервер недоступен - едем по сохранённой конфигурации
     if offline {
-        notify(&app, "connecting", "Сервер недоступен напрямую - подключаемся по сохранённым настройкам…");
+        notify(&app, "connecting", "Подключаемся…");   // 29.09: не пугаем - после подключения свежие настройки подтянутся через туннель
         crate::remote_log("vpn.cached_config", json!({}));
     }
     let choice = if token.is_empty() || offline { String::new() } else { transport_choice(&client, &token).await };
@@ -1375,6 +1383,10 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     // пауза кончилась - переподключаемся (снова попробуем AWG; не пойдёт - опять Xray на 30 мин)
     let h_awg_paused = !is_awg && choice == "amneziawg" && awg_off(&dir);
     let (h_url, h_dir, h_last) = (if offline { String::new() } else { url.clone() }, dir.clone(), last.clone());
+    // 29.09: подключились по сохранённой конфигурации - как только путь рабочий, забираем подписку ЧЕРЕЗ туннель и переподключаемся
+    // один раз на свежие настройки (раньше Мак мог днями ехать на старых)
+    let mut h_refresh = offline && !token.is_empty();
+    let h_token = token.clone();
     tauri::async_runtime::spawn(async move {
         let client = match reqwest::Proxy::all(format!("http://127.0.0.1:{HTTP_PORT}"))
             .and_then(|p| reqwest::Client::builder().proxy(p).timeout(Duration::from_secs(7)).build()) {
@@ -1417,6 +1429,31 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                 }
             }
             mark(&h, if path_ok { 1 } else { 0 });
+            if h_refresh && path_ok && crate::now_ms().saturating_sub(LAST_REFRESH.load(std::sync::atomic::Ordering::SeqCst)) > 30 * 60 * 1000 {
+                h_refresh = false;
+                LAST_REFRESH.store(crate::now_ms(), std::sync::atomic::Ordering::SeqCst);
+                let mut hd = reqwest::header::HeaderMap::new();
+                if let Ok(v) = reqwest::header::HeaderValue::from_str(&format!("ins-{}", crate::install_id())) { hd.insert("x-hwid", v); }
+                let via = reqwest::Proxy::all(format!("http://127.0.0.1:{HTTP_PORT}"))
+                    .and_then(|p| reqwest::Client::builder().proxy(p).default_headers(hd).timeout(Duration::from_secs(15)).build());
+                let mut body: Option<String> = None;
+                if let Ok(pc) = via {
+                    if let Ok(u) = sub_url(&pc, &h_token).await {
+                        if let Ok(r) = pc.get(&u).header("User-Agent", format!("InsellersVPN/desktop-{}", env!("CARGO_PKG_VERSION"))).send().await {
+                            if r.status().is_success() { body = r.text().await.ok().filter(|t| t.trim_start().starts_with(['[', '{'])); }
+                        }
+                    }
+                }
+                if let Some(t) = body {
+                    let _ = std::fs::write(h_dir.join("sub.fresh.json"), t);
+                    if cur_gen(&h) == watch_gen && wanted(&h) {
+                        crate::remote_log("vpn.config_refresh", json!({"via": "tunnel"}));
+                        let b = h.clone();
+                        std::thread::spawn(move || { let _ = tauri::async_runtime::block_on(start(b)); });
+                        break;
+                    }
+                }
+            }
             if h_awg_paused && path_ok && !awg_off(&h_dir) {
                 crate::remote_log("vpn.awg_return", json!({}));
                 let b = h.clone();
