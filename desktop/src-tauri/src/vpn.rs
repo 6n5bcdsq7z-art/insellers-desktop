@@ -197,6 +197,10 @@ pub fn cleanup_stale() {
 // 26.09: были 10808/10809 - это стандартные порты Happ/v2rayN; пока работал наш Xray, Happ не запускался
 // («Порт 10808 уже занят другим процессом»). Берём свои редкие порты.
 const SOCKS_PORT: u16 = 38808;
+/// 28.09 (tasks/00000c): вход wireproxy за маршрутизатором (только SOCKS, снаружи не виден)
+const AWG_INNER_PORT: u16 = 38818;
+/// 28.09 (владелец, tasks/00000c): невидимый маршрутизатор перед AWG - всё российское мимо туннеля. Откат: false.
+const AWG_ROUTER: bool = true;
 pub const HTTP_PORT: u16 = 38809;
 /// 26.09: вход только для проверки пути реальной загрузкой (правило маршрута ведёт его строго в путь, см. add_probe_rule)
 pub const PROBE_PORT: u16 = 38810;
@@ -208,6 +212,8 @@ const PROBE_URL: &str = "https://vpn.insellers.su/probe/";
 #[derive(Default)]
 pub struct VpnState {
     pub child: Mutex<Option<CommandChild>>,
+    /// 28.09 (tasks/00000c): локальный маршрутизатор перед AmneziaWG (xray: российское напрямую, остальное - в wireproxy)
+    pub router: Mutex<Option<CommandChild>>,
     /// Человек хочет быть подключённым (не нажимал «Отключить») — для переподключения и Kill Switch.
     pub wanted: std::sync::atomic::AtomicBool,
     pub retries: std::sync::atomic::AtomicU32,
@@ -300,6 +306,12 @@ async fn awg_conf_guest(client: &reqwest::Client, sub: &str) -> Result<String, S
     if !r.status().is_success() { return Err(format!("AmneziaWG до входа недоступен ({})", r.status().as_u16())); }
     let v: Value = r.json().await.map_err(|_| "AmneziaWG: неверный ответ сервера".to_string())?;
     awg_text(&v)
+}
+
+/// Тот же конфиг AWG, но wireproxy слушает только внутренний SOCKS (за маршрутизатором).
+fn awg_inner(conf: &str) -> String {
+    let i = conf.find("\n[Socks5]").unwrap_or(conf.len());
+    format!("{}\n[Socks5]\nBindAddress = 127.0.0.1:{AWG_INNER_PORT}\n", &conf[..i])
 }
 
 fn awg_text(v: &Value) -> Result<String, String> {
@@ -812,6 +824,64 @@ fn launch(app: &AppHandle, bin: &str, run_args: Vec<String>, dir: &PathBuf) -> R
 fn kill_child(app: &AppHandle) {
     let c = app.state::<VpnState>().child.lock().unwrap().take();
     if let Some(c) = c { let _ = c.kill(); }
+    let r = app.state::<VpnState>().router.lock().unwrap().take();
+    if let Some(r) = r { let _ = r.kill(); }
+}
+
+/// 28.09 (владелец, tasks/00000c): конфиг маршрутизатора перед AmneziaWG. Российское (.ru/.su/.рф, geosite category-ru и
+/// банков/госуслуг/магазинов, geoip:ru, платёжки и антифрод вне .ru) - напрямую с IP человека, остальное - в wireproxy (AWG).
+/// Без DNS-запросов в обход туннеля: domainStrategy AsIs (домены - по geosite, адреса - по geoip). insellers.su - всегда в
+/// туннель (иначе проверка связи через наш /probe прошла бы мимо мёртвого AWG).
+fn router_config(dir: &PathBuf) -> Value {
+    let geo = dir.join("geoip.dat").exists() && dir.join("geosite.dat").exists();
+    let mut ru: Vec<String> = ["domain:ru", "domain:su", "domain:xn--p1ai", "domain:sberbank.com", "domain:tbank-online.com",
+        "domain:payture.com", "domain:robokassa.com", "domain:rbk.money", "domain:qiwi.com", "domain:online-metrix.net",
+        "domain:threatmetrix.com", "domain:cardinalcommerce.com", "domain:fpjs.io", "domain:group-ib.com",
+        "domain:vkuser.net", "domain:userapi.com", "domain:mycdn.me", "domain:vk-cdn.net"].iter().map(|x| x.to_string()).collect();
+    if geo {
+        for g in ["geosite:category-ru", "geosite:category-gov-ru", "geosite:category-bank-ru", "geosite:category-ecommerce-ru"] { ru.push(g.into()); }
+    }
+    let mut rules = vec![
+        json!({"type": "field", "ip": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16"], "outboundTag": "direct"}),
+        json!({"type": "field", "domain": ["domain:insellers.su"], "outboundTag": "awg"}),
+        json!({"type": "field", "domain": ru, "outboundTag": "direct"}),
+    ];
+    if geo { rules.push(json!({"type": "field", "ip": ["geoip:ru"], "outboundTag": "direct"})); }
+    let sniff = json!({"enabled": true, "destOverride": ["http", "tls"], "routeOnly": true});
+    json!({
+        "log": {"loglevel": "warning"},
+        "inbounds": [
+            {"tag": "socks", "listen": "127.0.0.1", "port": SOCKS_PORT, "protocol": "socks", "settings": {"udp": true}, "sniffing": sniff},
+            {"tag": "http", "listen": "127.0.0.1", "port": HTTP_PORT, "protocol": "http", "sniffing": sniff}
+        ],
+        "outbounds": [
+            {"tag": "awg", "protocol": "socks", "settings": {"servers": [{"address": "127.0.0.1", "port": AWG_INNER_PORT}]}},
+            {"tag": "direct", "protocol": "freedom"},
+            {"tag": "block", "protocol": "blackhole"}
+        ],
+        "routing": {"domainStrategy": "AsIs", "rules": rules}
+    })
+}
+
+/// Запустить маршрутизатор (свой слот, не трогает основной процесс wireproxy).
+fn launch_router(app: &AppHandle, dir: &PathBuf) -> Result<(), String> {
+    let p = dir.join("router.json");
+    std::fs::write(&p, serde_json::to_vec(&router_config(dir)).unwrap()).map_err(|e| e.to_string())?;
+    let (mut rx, child) = app.shell().sidecar("xray").map_err(|e| e.to_string())?
+        .env("XRAY_LOCATION_ASSET", dir.to_string_lossy().to_string())
+        .args(["run", "-c", &p.to_string_lossy()])
+        .spawn().map_err(|e| format!("маршрутизатор: {e}"))?;
+    let pid = child.pid();
+    app.state::<VpnState>().router.lock().unwrap().replace(child);
+    tauri::async_runtime::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            if let CommandEvent::Terminated(t) = ev {
+                crate::remote_log("vpn.router_exit", json!({"pid": pid, "code": t.code}));
+                break;
+            }
+        }
+    });
+    Ok(())
 }
 
 /// Открывается ли внешний сайт ЧЕРЕЗ наш локальный вход (путь реально пропускает трафик). До ~9 с.
@@ -1051,7 +1121,9 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         match got {
             Ok(conf) => {
                 let p = dir.join("awg.conf");
-                std::fs::write(&p, conf).map_err(|e| e.to_string())?;
+                std::fs::write(&p, &conf).map_err(|e| e.to_string())?;
+                // 28.09 (00000c): с маршрутизатором wireproxy слушает только внутренний SOCKS, вход 38808/38809 - у маршрутизатора
+                let _ = std::fs::write(dir.join("awg-inner.conf"), awg_inner(&conf));
                 Some(p)
             }
             Err(e) => {
@@ -1067,7 +1139,20 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     let mut is_awg = false;
     if let Some(path) = awg_path {
         notify(&app, "connecting", "Подключаемся через AmneziaWG…");
-        launch(&app, "wireproxy", vec!["-c".into(), path.to_string_lossy().to_string()], &dir)?;
+        let inner = dir.join("awg-inner.conf");
+        let mut routed = false;
+        if AWG_ROUTER && inner.exists() {
+            let _ = ensure_geo(&app, &dir).await;      // geosite/geoip для российского мимо туннеля (без них - только по зонам)
+            launch(&app, "wireproxy", vec!["-c".into(), inner.to_string_lossy().to_string()], &dir)?;
+            match launch_router(&app, &dir) {
+                Ok(()) => routed = true,
+                Err(e) => { crate::remote_log("vpn.router_fail", json!({"err": e})); kill_child(&app); }
+            }
+        }
+        if !routed {
+            launch(&app, "wireproxy", vec!["-c".into(), path.to_string_lossy().to_string()], &dir)?;
+        }
+        crate::remote_log("vpn.awg_router", json!({"on": routed}));
         if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
         if link_ok().await { is_awg = true; set_cur_path("awg"); }
         else {
