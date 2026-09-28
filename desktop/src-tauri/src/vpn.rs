@@ -1371,6 +1371,9 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     let h = app.clone();
     let h_choice = choice.clone();
     let h_temp_auto = temp_auto;
+    // 28.09 (владелец): тихий возврат на AmneziaWG - человек выбрал AWG, а мы на Xray из-за паузы после сбоя AWG (awg_off, 30 мин);
+    // пауза кончилась - переподключаемся (снова попробуем AWG; не пойдёт - опять Xray на 30 мин)
+    let h_awg_paused = !is_awg && choice == "amneziawg" && awg_off(&dir);
     let (h_url, h_dir, h_last) = (if offline { String::new() } else { url.clone() }, dir.clone(), last.clone());
     tauri::async_runtime::spawn(async move {
         let client = match reqwest::Proxy::all(format!("http://127.0.0.1:{HTTP_PORT}"))
@@ -1414,6 +1417,12 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                 }
             }
             mark(&h, if path_ok { 1 } else { 0 });
+            if h_awg_paused && path_ok && !awg_off(&h_dir) {
+                crate::remote_log("vpn.awg_return", json!({}));
+                let b = h.clone();
+                std::thread::spawn(move || { let _ = tauri::async_runtime::block_on(start(b)); });
+                break;
+            }
             if path_ok {
                 if degraded { degraded = false; notify(&h, "connected", "Соединение восстановлено"); }
                 fails = 0;

@@ -358,7 +358,8 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                                          else { "INSELLERS VPN - не подключено".to_string() }));
             #[cfg(target_os = "macos")]
             {
-                let t = if on { format!("↓{down} ↑{up}") } else { String::new() };
+                // 28.09 (владелец): в строке меню без «/с» - короче, значок не уходит за вырез экрана
+                let t = if on { format!("↓{} ↑{}", down.trim_end_matches("/с"), up.trim_end_matches("/с")) } else { String::new() };
                 let t = if upd_ready { format!("⬆ {t}").trim().to_string() } else { t };
                 let _ = tray.set_title(if t.is_empty() { None } else { Some(t) });
             }
