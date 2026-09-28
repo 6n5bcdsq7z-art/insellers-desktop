@@ -1542,6 +1542,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                     let dead_desc = cur_desc();
                     crate::remote_log("vpn.path_dead", json!({"path": dead, "desc": dead_desc, "reason": dead_why, "kb": got / 1024,
                         "ms": took, "kbps": kbps(got, took), "manual": manual_choice(&h_choice)}));
+                    crate::check::maybe_run("path_dead");        // 29.09: замер адресов проверки напрямую -> /api/check/result
                     if manual_choice(&h_choice) && !h_url.is_empty() {
                         // 26.09 (владелец): ручной протокол не пропускает трафик - временно «Автовыбор» на 15 мин
                         TEMP_AUTO_UNTIL.store(crate::now_ms() + 15 * 60 * 1000, std::sync::atomic::Ordering::SeqCst);
