@@ -981,12 +981,13 @@ fn launch_router(app: &AppHandle, dir: &PathBuf) -> Result<(), String> {
 }
 
 /// Открывается ли внешний сайт ЧЕРЕЗ наш локальный вход (путь реально пропускает трафик). До ~9 с.
-async fn link_ok() -> bool {
+async fn link_ok() -> bool { link_ok_within(9).await }
+async fn link_ok_within(secs: u64) -> bool {
     let client = match reqwest::Proxy::all(format!("http://127.0.0.1:{HTTP_PORT}"))
         .and_then(|p| reqwest::Client::builder().proxy(p).timeout(Duration::from_secs(4)).build()) { Ok(c) => c, Err(_) => return false };
     let t0 = std::time::Instant::now();
     tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_millis(700))).await.ok();
-    while t0.elapsed() < Duration::from_secs(9) {
+    while t0.elapsed() < Duration::from_secs(secs) {
         for u in ["http://cp.cloudflare.com/generate_204", "http://connectivitycheck.gstatic.com/generate_204", "https://vpn.insellers.su/probe/204"] {
             if let Ok(r) = client.get(u).send().await {
                 let s = r.status().as_u16();
@@ -1133,7 +1134,7 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
     match start_once(app.clone()).await {
         Err(e) if e.starts_with("RETRY_AUTO:") => {
             let name = e.trim_start_matches("RETRY_AUTO:").to_string();
-            notify(&app, "connecting", "Выбранный протокол не пропускает трафик - подключаем через «Автовыбор»…");
+            notify(&app, "connecting", "Связь слабая - пробуем другие пути…");
             let r = start_once(app.clone()).await;
             if r.is_ok() {
                 let m = format!("Выбранный протокол («{name}») сейчас не работает в Вашей сети - временно подключили через «Автовыбор»");
@@ -1169,7 +1170,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     for n in stop_other_ne_vpns() { if !killed.contains(&n) { killed.push(n); } }
     if !killed.is_empty() { notify(&app, "connecting", &format!("Отключаем другой VPN: {}…", killed.join(", "))); }
     if !failed.is_empty() {
-        return Err(format!("OTHER_VPN:Не получилось закрыть {} - закройте его вручную и нажмите «Подключить» ещё раз", failed.join(", ")));
+        return Err(format!("OTHER_VPN:Не получилось закрыть {} - закройте его вручную и нажмите «Включить» ещё раз", failed.join(", ")));
     }
     if !killed.is_empty() { std::thread::sleep(Duration::from_millis(800)); }
     let token = crate::load_token();
@@ -1250,12 +1251,13 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         }
         crate::remote_log("vpn.awg_router", json!({"on": routed}));
         if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
-        if link_ok().await { is_awg = true; set_cur_path("awg"); }
+        // 29.09 (владелец): на слабой сети рукопожатие AWG съедало треть из 9 с - AWG даём 15 с
+        if link_ok_within(15).await { is_awg = true; set_cur_path("awg"); }
         else {
             kill_child(&app);
             set_awg_off(&dir);
             crate::remote_log("vpn.awg_fallback", json!({"err": "no traffic at start"}));
-            notify(&app, "connecting", "AmneziaWG не пропускает трафик - пробуем другие пути…");
+            notify(&app, "connecting", "Связь слабая - пробуем другие пути…");
         }
         if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
     }
@@ -1314,8 +1316,8 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                 crate::remote_log("vpn.manual_fallback", json!({"manual": manual_name(&choice), "at": "connect"}));
                 return Err(format!("RETRY_AUTO:{}", manual_name(&choice)));
             }
-            None if manual_choice(&choice) => return Err("Выбранный протокол сейчас не пропускает трафик - включите «Автовыбор» в настройках".into()),
-            None => return Err("Не удалось подключиться: ни один путь не пропускает трафик. Попробуйте другую сеть или напишите в поддержку".into()),
+            None if manual_choice(&choice) => return Err("Связь слабая - включите «Автовыбор» в настройках: он подберёт другой путь".into()),
+            None => return Err("Связь не установилась - проверьте интернет и нажмите «Включить» ещё раз".into()),
         }
     }
     if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
@@ -1618,7 +1620,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                 if is_awg && fails >= 2 {
                     if let Ok(d) = data_dir(&h) { set_awg_off(&d); }
                     crate::remote_log("vpn.awg_fallback", json!({"err": "no traffic", "fails": fails}));
-                    notify(&h, "connecting", "AmneziaWG не пропускает трафик - переключаемся на Xray…");
+                    notify(&h, "connecting", "Связь слабая - пробуем другие пути…");
                     let b = h.clone();
                     // отдельный поток + block_on, как при переподключении после падения ядра (future start() не Send)
                     std::thread::spawn(move || {
@@ -1644,7 +1646,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                         TEMP_AUTO_UNTIL.store(crate::now_ms() + 15 * 60 * 1000, std::sync::atomic::Ordering::SeqCst);
                         let name = manual_name(&h_choice);
                         crate::remote_log("vpn.manual_fallback", json!({"from": dead_desc, "manual": name}));
-                        notify(&h, "connecting", "Выбранный протокол не пропускает трафик - подключаем через «Автовыбор»…");
+                        notify(&h, "connecting", "Связь слабая - пробуем другие пути…");
                         let b = h.clone();
                         std::thread::spawn(move || {
                             if !wanted(&b) { return; }
@@ -1659,7 +1661,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                         if crate::now_ms().saturating_sub(manual_warned) > 30 * 60 * 1000 {
                             manual_warned = crate::now_ms();
                             degraded = true; mark(&h, 2);
-                            notify(&h, "degraded", "Выбранный протокол сейчас не пропускает трафик - включите «Автовыбор» в настройках");
+                            notify(&h, "degraded", "Связь слабая - включите «Автовыбор» в настройках: он подберёт другой путь");
                         }
                     } else if let Some(to) = { let t0 = crate::now_ms(); let hc = HOT_CUR.lock().unwrap().clone(); hot_switch(&h, &h_dir, &hc).await.map(|t| (t, t0)) } {
                         // этап 7: без перезапуска ядра
@@ -1670,7 +1672,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                         notify(&h, "connected", "Соединение восстановлено");
                     } else {
                         mark_bad(&dead);
-                        notify(&h, "connecting", "Путь перестал отвечать - переключаемся на другой…");
+                        notify(&h, "connecting", "Связь слабая - пробуем другие пути…");
                         let b = h.clone();
                         let t_fail = crate::now_ms();
                         std::thread::spawn(move || {

@@ -392,7 +392,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
     let status = MenuItem::with_id(app, "status", "Не подключено", false, None::<&str>)?;
     let open = MenuItem::with_id(app, "open", "Открыть INSELLERS VPN", true, None::<&str>)?;
-    let toggle = MenuItem::with_id(app, "toggle", "Подключить", true, None::<&str>)?;
+    let toggle = MenuItem::with_id(app, "toggle", "Включить", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Выйти", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&status, &PredefinedMenuItem::separator(app)?, &open, &toggle, &PredefinedMenuItem::separator(app)?, &quit])?;
     let mut tb = TrayIconBuilder::with_id("main")
@@ -455,7 +455,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                 let st = if on { if al.is_empty() { format!("Подключено · ↓ {down}  ↑ {up}") } else { format!("Подключено · {al} · ↓ {down}  ↑ {up}") } }
                          else { "Не подключено".to_string() };
                 let _ = items.status.set_text(if upd_ready { format!("⬆ Вышло обновление! · {st}") } else { st });
-                let _ = items.toggle.set_text(if on { "Отключить" } else { "Подключить" });
+                let _ = items.toggle.set_text(if on { "Отключить" } else { "Включить" });
             }
             let al = access_left_text();
             let _ = tray.set_tooltip(Some(if on { format!("INSELLERS VPN - защищено{}\n↓ {down}   ↑ {up}", if al.is_empty() { String::new() } else { format!(" · {al}") }) }
