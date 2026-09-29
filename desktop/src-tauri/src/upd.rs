@@ -53,7 +53,13 @@ pub async fn fetch(url: &str, tunnel_ok: bool, mut progress: impl FnMut(u64)) ->
     let mut cap: f64 = 0.0;                  // байт/с без ограничения (лучшее измеренное)
     let mut last_err = String::new();
     let mut nets = sysinfo::Networks::new_with_refreshed_list();
+    // 30.09 (владелец: Mac «Обновить» - 0%, «ещё раз» - снова 0%): 30 с без единого байта - ошибка, а не 30 попыток по 30 с молча;
+    // BusyGuard снимет BUSY, страница получит 'error', следующее нажатие начнёт новую загрузку
+    let mut last_byte = Instant::now();
     for attempt in 0..30u32 {
+        if last_byte.elapsed() >= Duration::from_secs(30) {
+            return Err(format!("нет данных 30 с{}", if last_err.is_empty() { String::new() } else { format!(" ({last_err})") }));
+        }
         if attempt > 0 { sleep_ms(if via_tunnel { 500 } else { 1500 }).await; }
         let c = client(via_tunnel)?;
         let mut req = c.get(url).header("Accept", "application/octet-stream");
@@ -81,6 +87,7 @@ pub async fn fetch(url: &str, tunnel_ok: bool, mut progress: impl FnMut(u64)) ->
         loop {
             match resp.chunk().await {
                 Ok(Some(ch)) => {
+                    last_byte = Instant::now();
                     buf.extend_from_slice(&ch);
                     win_ours += ch.len() as u64;
                     if let Some(t) = total { if t > 0 {
