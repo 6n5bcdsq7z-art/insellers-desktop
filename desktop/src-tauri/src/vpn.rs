@@ -260,6 +260,8 @@ fn arm_guest_timer(app: &AppHandle, until: u64) {
 /// не пробуем, подключаемся через Xray (как Android). Отметка - файл awg_off (время в мс) в папке данных.
 // 27.09 (tasks/0000b): AmneziaWG - умолчание; не пошёл - Xray на 30 мин, потом снова пробуем AWG (было 6 ч)
 const AWG_OFF_MS: u64 = 30 * 60 * 1000;
+/// 30.09: когда в последний раз уходили с AmneziaWG по живой проверке (не чаще раза в 30 с)
+static LAST_AWG_SW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 fn awg_off(dir: &PathBuf) -> bool {
     std::fs::read_to_string(dir.join("awg_off")).ok().and_then(|t| t.trim().parse::<u64>().ok())
         .map(|t| crate::now_ms().saturating_sub(t) < AWG_OFF_MS).unwrap_or(false)
@@ -1661,10 +1663,24 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
             } else {
                 fails += 1;
                 // AmneziaWG: ключ получен, а трафика нет 2 проверки подряд - уходим на Xray и 6 часов AWG здесь не пробуем
-                if is_awg && fails >= 2 {
-                    if let Ok(d) = data_dir(&h) { set_awg_off(&d); }
+                // 30.09 (самопочинка Г): только если интернет без VPN есть (иначе менять путь бесполезно) и не чаще раза в 30 с;
+                // в центр - vpn.path_dead how=awg_live; 3 раза за час - понятная строка человеку
+                let nowg = crate::now_ms();
+                if is_awg && fails >= 2 && nowg.saturating_sub(LAST_AWG_SW.load(std::sync::atomic::Ordering::SeqCst)) >= 30_000 && direct_ok().await {
+                    LAST_AWG_SW.store(nowg, std::sync::atomic::Ordering::SeqCst);
+                    let mut n1h = 1usize;
+                    if let Ok(d) = data_dir(&h) {
+                        set_awg_off(&d);
+                        let hp = d.join("awg_live_hist");
+                        let mut hist: Vec<u64> = std::fs::read_to_string(&hp).unwrap_or_default().split(',')
+                            .filter_map(|x| x.trim().parse::<u64>().ok()).filter(|t| nowg.saturating_sub(*t) < 3_600_000).collect();
+                        hist.push(nowg);
+                        n1h = hist.len();
+                        let _ = std::fs::write(&hp, hist.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(","));
+                    }
                     crate::remote_log("vpn.awg_fallback", json!({"err": "no traffic", "fails": fails}));
-                    notify(&h, "connecting", "Связь слабая - пробуем другие пути…");
+                    crate::remote_log("vpn.path_dead", json!({"path": "awg", "reason": "no204", "how": "awg_live", "n1h": n1h}));
+                    notify(&h, "connecting", if n1h >= 3 { "Сеть сейчас плохо пропускает VPN - работаем через запасной путь" } else { "Связь слабая - пробуем другие пути…" });
                     let b = h.clone();
                     // отдельный поток + block_on, как при переподключении после падения ядра (future start() не Send)
                     std::thread::spawn(move || {
@@ -1747,7 +1763,8 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                     break;
                 }
             }
-            let secs = if fails > 0 { 5 } else { 30 };
+            // 30.09 (самопочинка Г): при AmneziaWG проверяем чаще - раз в 15 с (Xray - как было, 30 с)
+            let secs = if fails > 0 { 5 } else if is_awg { 15 } else { 30 };
             tauri::async_runtime::spawn_blocking(move || std::thread::sleep(Duration::from_secs(secs))).await.ok();
         }
     });
