@@ -211,6 +211,32 @@ fn init_script(token: &str, version: &str) -> String {
     getVpnState: function () {{ return window.__INS_VPN || "disconnected"; }},
     setAccessUntil: function (ms) {{ inv("set_access", {{ ms: String(ms) }}); }}
   }};
+  // 29.09 (владелец): во внешний браузер - только переходы по нажатию человека (ссылка, window.open из клика). iframe и
+  // фоновые запросы рекламных SDK (GigaPub pxl.iframe, VAST OnClickA, RichAds) остаются внутри окна.
+  var ext = function (u) {{
+    try {{
+      var x = new URL(String(u), location.href);
+      if (x.protocol === "tg:") return x.href;
+      if ((x.protocol === "https:" || x.protocol === "http:") && x.host !== location.host) return x.href;
+    }} catch (e) {{}}
+    return null;
+  }};
+  document.addEventListener("click", function (e) {{
+    if (!e.isTrusted) return;                                   // нажатие человека, а не скрипт
+    var a = e.target && e.target.closest ? e.target.closest("a[href]") : null;
+    var u = a ? ext(a.getAttribute("href")) : null;
+    if (!u) return;
+    e.preventDefault(); e.stopPropagation();
+    inv("open_external", {{ url: u }});
+  }}, true);
+  var wo = window.open;
+  window.open = function (u) {{
+    var x = u ? ext(u) : null;
+    if (!x) return wo.apply(window, arguments);
+    var act = navigator.userActivation ? navigator.userActivation.isActive : true;
+    if (act) inv("open_external", {{ url: x }});                // без нажатия (фон SDK) - никуда не открываем
+    return {{ closed: false, close: function () {{}}, focus: function () {{}}, blur: function () {{}}, postMessage: function () {{}}, location: {{}} }};
+  }};
 }})();
 "#)
 }
@@ -223,6 +249,7 @@ fn build_main(app: &AppHandle) -> tauri::Result<()> {
     let token = load_token();
     let version = app.package_info().version.to_string();
     let handle = app.clone();
+    let handle_nw = app.clone();
     // Окно открывается с локальной заставки (dist/index.html): «Идёт подключение» с анимацией.
     // Она ждёт, пока сервер станет доступен, и сама уходит на страницу приложения. Раньше окно
     // сразу грузило сайт — после перезагрузки без интернета оставался белый экран навсегда.
@@ -241,10 +268,28 @@ fn build_main(app: &AppHandle) -> tauri::Result<()> {
         .initialization_script(&format!("window.__INS_V = {};", serde_json::to_string(&version).unwrap_or_default()))
         // 26.09: после перезагрузки страницы (обновление веб-части, заставка → сайт) она не знала, что VPN уже включён
         // (состояние приходит только событиями) - и её «автоподключение» перезапускало рабочее подключение
-        .on_page_load(|w, p| {
+        .on_page_load(move |w, p| {
+            // 29.09: главное окно само ушло на чужой сайт (рекламный скрипт увёл всю страницу) - адрес во внешний браузер,
+            // окно - обратно на приложение. iframe сюда не попадают (событие только главного окна).
+            if p.event() == tauri::webview::PageLoadEvent::Started && matches!(p.url().scheme(), "https" | "http")
+                && p.url().host_str() != Some(HOST) && p.url().host_str() != Some("tauri.localhost") {
+                let _ = w.app_handle().opener().open_url(p.url().as_str(), None::<&str>);
+                if let Ok(back) = url::Url::parse(&format!("https://{HOST}/?app=desktop&v={}", w.app_handle().package_info().version)) {
+                    let _ = w.navigate(back);
+                }
+                return;
+            }
             if p.event() == tauri::webview::PageLoadEvent::Finished && p.url().host_str() == Some(HOST) && vpn_running(w.app_handle()) {
                 let _ = w.eval("if(!window.__INS_VPN||window.__INS_VPN==='disconnected'){window.__INS_VPN='connected';if(!window.__INS_CONN_AT)window.__INS_CONN_AT=Date.now();window.dispatchEvent(new CustomEvent('ins:vpn',{detail:{state:'connected',msg:'',code:''}}))}");
             }
+        })
+        // 29.09: запрос НОВОГО окна (ссылка target=_blank или window.open внутри рекламного iframe - это нажатие на рекламу)
+        // - во внешний браузер, окон внутри приложения не создаём
+        .on_new_window(move |u, _features| {
+            if matches!(u.scheme(), "https" | "http" | "tg") {
+                let _ = handle_nw.opener().open_url(u.as_str(), None::<&str>);
+            }
+            tauri::webview::NewWindowResponse::Deny
         })
         .on_navigation(move |u| {
             // своя локальная заставка (macOS/Linux: tauri://localhost, Windows: http(s)://tauri.localhost)
@@ -257,11 +302,15 @@ fn build_main(app: &AppHandle) -> tauri::Result<()> {
                 tauri::async_runtime::spawn(async move { native_cmd(h, &cmd, arg).await; });
                 return false;
             }
-            let ours = u.scheme() == "https" && u.host_str() == Some(HOST);
-            if !ours && (u.scheme() == "https" || u.scheme() == "tg") {
+            // 29.09 (владелец): раньше ЛЮБОЙ чужой https (и iframe рекламных SDK - на Mac обработчик зовётся и для них)
+            // открывался во внешнем браузере. Теперь: чужие http(s)/about/data/blob грузятся внутри (iframe, счётчики SDK);
+            // переходы по нажатию человека уводит во внешний браузер скрипт страницы (open_external), а если главное окно
+            // всё же уходит на чужой сайт - его возвращает on_page_load. tg: - всегда наружу.
+            if u.scheme() == "tg" {
                 let _ = handle.opener().open_url(u.as_str(), None::<&str>);
+                return false;
             }
-            ours
+            matches!(u.scheme(), "https" | "http" | "about" | "data" | "blob")
         })
         .build()?;
     Ok(())
