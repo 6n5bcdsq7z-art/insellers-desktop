@@ -613,6 +613,13 @@ fn open_external(app: AppHandle, url: String) {
     if url.starts_with("https://") || url.starts_with("tg://") { let _ = app.opener().open_url(&url, None::<&str>); }
 }
 
+/// 30.09: событие обновления странице без процента (стадия + пометка причины)
+fn update_page(app: &AppHandle, stage: &str, msg: &str) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.eval(&format!("window.dispatchEvent(new CustomEvent('ins:update-progress',{{detail:{{pct:0,stage:'{stage}',msg:'{msg}'}}}}))"));
+    }
+}
+
 #[tauri::command]
 async fn check_update(app: AppHandle, manual: Option<bool>) -> Result<bool, String> {
     // 29.09: X-App-Token - бэкенд отдаёт владельцу кандидата (Mac в режиме TUN ходит с адреса нашего сервера - по адресу не узнать)
@@ -676,8 +683,23 @@ async fn check_update(app: AppHandle, manual: Option<bool>) -> Result<bool, Stri
             }
             Ok(true)
         }
-        Ok(None) => { let _ = manual; Ok(false) }
-        Err(e) => Err(e.to_string()),
+        // 30.09 (владелец): по кнопке «новой версии нет» и «проверка не удалась» - не молча: странице 'error' (следующее нажатие -
+        // установщик в браузере), в журнал update.none / update.fail. Бывает, когда страница знает о кандидате, а проверка
+        // обновлений ходит без токена (сборки до 1.0.130) или через туннель с адреса сервера.
+        Ok(None) => {
+            if manual.unwrap_or(false) {
+                update_page(&app, "error", "none");
+                remote_log("update.none", serde_json::json!({"cur": env!("CARGO_PKG_VERSION"), "token": !load_token().is_empty()}));
+            }
+            Ok(false)
+        }
+        Err(e) => {
+            if manual.unwrap_or(false) {
+                update_page(&app, "error", "check");
+                remote_log("update.fail", serde_json::json!({"err": e.to_string(), "stage": "check"}));
+            }
+            Err(e.to_string())
+        }
     }
 }
 
