@@ -950,6 +950,22 @@ fn kill_child(app: &AppHandle) {
     if let Some(r) = r { let _ = r.kill(); }
 }
 
+/// 29.09 вечер (ревизия рекламы): хосты ПОКАЗА наших рекламных сетей - напрямую, с IP человека (копия OUR_AD_NETWORKS из sub.py,
+/// менять вместе). До этого при AmneziaWG вся реклама шла через туннель: сети видели адрес нашего сервера - Adsterra отвечала
+/// 403 на скрипт (журнал: banner.nofill why=script), Kadam/OnClickA/HilltopAds - «нет рекламы»; без VPN на том же Mac - показ.
+/// gigapub.tech здесь НЕТ: его хосты на Hetzner (в РФ заблокирован) - остаётся в туннеле.
+const AD_DIRECT: &[&str] = &[
+    "sad.adsgram.ai", "api.adsgram.ai", "tma.adsgram.ai", "image.adsgram.ai", "images.adsgram.ai", "adsgram.me",
+    "libtl.com", "onclckvd.com", "onclckstr.com", "onclckmetrics.com", "richinfo.co", "adx1.com", "4armn.com",
+    "convers.link", "7ool.net", "adp3.net", "munqu.com", "cdn.giga.pub", "mndx1.com", "mvdomnd.com", "pebblepilot.com",
+    "onclckmn.com", "onclcktg.com", "onclckpp.com", "onclckpop.com", "onclckinp.com", "onclmng.com", "yomeno.xyz",
+    "canstrm.com", "capndr.com", "korlumo.com", "w.tads.me", "api.tads.me", "backend.tads.me", "a-ads.com",
+    "highrevenueformat.com", "zog.link", "tubecup.net", "ntvpwpush.com", "physicaldad.com", "untimely-hello.com",
+    "silent-basis.pro", "overdue-share.pro", "phoroglopsu.com", "onclckbnr.com", "onclckbn.net", "drimquop.com",
+    "metricswpsh.com", "adspector.io", "gstcpx.site", "afrdtech.com", "ad-score.com", "bartcons.com",
+    "netdeliveryservice.com", "mcpuwpsh.com", "favorit.work", "hdbkome.com", "hdacode.com", "uuidksinc.net",
+];
+
 /// 28.09 (владелец, tasks/00000c): конфиг маршрутизатора перед AmneziaWG. Российское (.ru/.su/.рф, geosite category-ru и
 /// банков/госуслуг/магазинов, geoip:ru, платёжки и антифрод вне .ru) - напрямую с IP человека, остальное - в wireproxy (AWG).
 /// Без DNS-запросов в обход туннеля: domainStrategy AsIs (домены - по geosite, адреса - по geoip). insellers.su - всегда в
@@ -963,9 +979,11 @@ fn router_config(dir: &PathBuf) -> Value {
     if geo {
         for g in ["geosite:category-ru", "geosite:category-gov-ru", "geosite:category-bank-ru", "geosite:category-ecommerce-ru"] { ru.push(g.into()); }
     }
+    let ads: Vec<String> = AD_DIRECT.iter().map(|d| format!("domain:{d}")).collect();
     let mut rules = vec![
         json!({"type": "field", "ip": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16"], "outboundTag": "direct"}),
         json!({"type": "field", "domain": ["domain:insellers.su"], "outboundTag": "awg"}),
+        json!({"type": "field", "domain": ads, "outboundTag": "direct"}),
         json!({"type": "field", "domain": ru, "outboundTag": "direct"}),
     ];
     if geo { rules.push(json!({"type": "field", "ip": ["geoip:ru"], "outboundTag": "direct"})); }
