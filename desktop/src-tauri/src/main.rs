@@ -340,6 +340,40 @@ fn show_main(app: &AppHandle) {
     else { let _ = build_main(app); }
 }
 
+/// 29.09 (владелец): свой пульс, пока VPN включён, - и при закрытом окне (страница мини-аппа тогда не шлёт).
+/// Тот же /api/app/heartbeat и тот же hwid, что у страницы; команда выдаётся один раз - выполняет тот, кто спросил первым.
+/// «disconnect» (кнопка «Отключить» в мини-аппе на другом устройстве) - как ручное выключение (vpn_disconnect).
+fn start_pulse(h: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let hw = format!("ins-{}", install_id());
+        let os = if cfg!(target_os = "macos") { "mac" } else if cfg!(target_os = "windows") { "windows" } else { "linux" };
+        let mut conn_at: u64 = 0;
+        loop {
+            tokio_sleep(20).await;
+            if !vpn_running(&h) { conn_at = 0; continue; }
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            if conn_at == 0 { conn_at = now; }
+            let t = load_token();
+            if t.is_empty() { continue; }
+            let body = serde_json::json!({"hwid": hw, "connected_at": conn_at, "bytes": 0, "platform": "desktop", "model": host_model()});
+            // как remote_log: сначала мимо системного прокси, не вышло - через него
+            let mut cmd = String::new();
+            for direct in [true, false] {
+                let b = reqwest::Client::builder().timeout(Duration::from_secs(10));
+                let b = if direct { b.no_proxy() } else { b };
+                let Ok(c) = b.build() else { continue };
+                let Ok(r) = c.post(format!("{BASE}/api/app/heartbeat")).header("X-App-Token", t.clone()).json(&body).send().await else { continue };
+                if !r.status().is_success() { break; }
+                if let Ok(j) = r.json::<serde_json::Value>().await { cmd = j.get("cmd").and_then(|v| v.as_str()).unwrap_or("").to_string(); }
+                break;
+            }
+            if cmd.is_empty() { continue; }
+            remote_log("devices.cmd_exec", serde_json::json!({"cmd": cmd, "src": format!("desktop-{os}-native")}));
+            if cmd == "disconnect" && vpn_running(&h) { vpn_disconnect(h.clone()); conn_at = 0; }
+        }
+    });
+}
+
 struct TrayItems { status: tauri::menu::MenuItem<tauri::Wry>, toggle: tauri::menu::MenuItem<tauri::Wry> }
 
 fn vpn_running(app: &AppHandle) -> bool {
@@ -672,6 +706,7 @@ fn main() {
                 let h = app.handle().clone();
                 app.deep_link().on_open_url(move |_ev| { show_main(&h); });
             }
+            start_pulse(app.handle().clone());
             if let Err(e) = setup_tray(app) { remote_log("tray.error", serde_json::json!({"err": e.to_string()})); }
             apply_autostart(app.handle(), pref("autoconnect"));
             // VPN был включён до обновления — включаем снова, даже без автоподключения
