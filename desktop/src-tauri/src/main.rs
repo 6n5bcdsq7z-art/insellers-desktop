@@ -571,6 +571,9 @@ async fn check_update(app: AppHandle, manual: Option<bool>) -> Result<bool, Stri
 
 fn main() {
     tauri::Builder::default()
+        // 29.09: вторая копия (Windows: так приходит ссылка insellers://open) - не запускаем, показываем окно первой
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| { show_main(app); }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
@@ -585,6 +588,12 @@ fn main() {
         .setup(|app| {
             remote_log("app.start", serde_json::json!({"hasToken": !load_token().is_empty()}));
             build_main(app.handle())?;
+            // 29.09: insellers://open (Mac - событие ссылки в запущенное приложение) - показать окно
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let h = app.handle().clone();
+                app.deep_link().on_open_url(move |_ev| { show_main(&h); });
+            }
             if let Err(e) = setup_tray(app) { remote_log("tray.error", serde_json::json!({"err": e.to_string()})); }
             apply_autostart(app.handle(), pref("autoconnect"));
             // VPN был включён до обновления — включаем снова, даже без автоподключения

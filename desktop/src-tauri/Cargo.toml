@@ -15,6 +15,10 @@ tauri-plugin-shell = "2"
 sysproxy = "0.3"
 sysinfo = "=0.32.1"
 tauri-plugin-autostart = "2"
+# 29.09 (владелец): ссылка insellers://open (кнопка «Открыть INSELLERS VPN» в боте -> open.html) открывает окно приложения;
+# на Windows ссылка запускает вторую копию - single-instance передаёт её в уже запущенное приложение
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
