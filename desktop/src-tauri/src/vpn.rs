@@ -709,7 +709,17 @@ pub async fn tunnel_check() -> (bool, u64, String) {
             if s == 204 || s == 200 { return (true, t0.elapsed().as_millis() as u64, "204".into()); }
         }
     }
+    if telegram_ok(&client).await { return (true, t0.elapsed().as_millis() as u64, "telegram_only".into()); }
     (false, t0.elapsed().as_millis() as u64, "fail".into())
+}
+
+/// 29.09 (владелец): ограниченный режим / гостевой доступ = «только Telegram»: generate_204 и наш сервер закрыты НАМЕРЕННО.
+/// Telegram через туннель отвечает (любой HTTP-ответ) - связь есть, это не «нет интернета», переподключать нельзя.
+async fn telegram_ok(client: &reqwest::Client) -> bool {
+    for u in ["https://api.telegram.org/", "https://web.telegram.org/"] {
+        if client.get(u).send().await.is_ok() { return true; }
+    }
+    false
 }
 
 static LAST_FORCED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -718,7 +728,8 @@ static LAST_FORCED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 fn reconnect_retry(app: &AppHandle, t_ev: u64, reason: &'static str) {
     let b = app.clone();
     std::thread::spawn(move || {
-        for i in 0..20 {
+        // первые 10 мин - раз в 30 с, дальше - раз в 2 мин, пока VPN включён (29.09: не сдаваться)
+        for i in 0u32.. {
             if !wanted(&b) { return; }
             match tauri::async_runtime::block_on(start(b.clone())) {
                 Ok(()) => {
@@ -730,9 +741,9 @@ fn reconnect_retry(app: &AppHandle, t_ev: u64, reason: &'static str) {
                 }
                 Err(e) if e == "CANCELLED" || e == "BUSY" => return,
                 Err(e) => {
-                    if i == 19 { if !crate::pref("killswitch") && wanted(&b) { set_proxy(false); } if wanted(&b) { notify(&b, "error", &e); } return; }
+                    if i == 0 { crate::remote_log("vpn.reconnect_wait", json!({"reason": reason, "err": e.chars().take(120).collect::<String>()})); }
                     notify(&b, "connecting", "Нет сети - ждём и переподключаемся…");
-                    std::thread::sleep(Duration::from_secs(30));
+                    std::thread::sleep(Duration::from_secs(if i < 20 { 30 } else { 120 }));
                 }
             }
         }
@@ -745,12 +756,14 @@ fn wake_recover(app: &AppHandle, gen: u32, reason: &'static str) {
     let w = app.clone();
     let t_ev = crate::now_ms();
     tauri::async_runtime::spawn(async move {
+        notify(&w, "connecting", "Проверяем связь…");       // 29.09: «Подключено» - только после прошедшей проверки
         tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_secs(3))).await.ok();
         for i in 0..2 {
             if cur_gen(&w) != gen || !wanted(&w) { return; }
             let (ok, ms, how) = tunnel_check().await;
             if ok {
                 crate::remote_log("vpn.wake_ok", json!({"reason": reason, "secs": crate::now_ms().saturating_sub(t_ev) / 1000, "ms": ms, "how": how, "try": i}));
+                notify(&w, "connected", "");
                 return;
             }
             tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_secs(3))).await.ok();
@@ -1485,6 +1498,13 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                 }
             }
             if cur_gen(&h) != watch_gen || !wanted(&h) { break; }
+            // 29.09: ограниченный режим / гость - 204 и наш сервер закрыты намеренно; Telegram отвечает - связь в порядке, дальше не проверяем
+            if !ok && telegram_ok(&client).await {
+                if degraded { degraded = false; notify(&h, "connected", ""); }
+                fails = 0; mark(&h, 1);
+                tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_secs(30))).await.ok();
+                continue;
+            }
             n += 1;
             // реальная загрузка (не для AmneziaWG: у wireproxy нет входа проверки)
             let mut path_ok = ok;
