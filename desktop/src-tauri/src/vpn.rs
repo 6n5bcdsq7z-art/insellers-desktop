@@ -962,7 +962,7 @@ const AD_DIRECT: &[&str] = &[
     "convers.link", "7ool.net", "adp3.net", "munqu.com", "cdn.giga.pub", "mndx1.com", "mvdomnd.com", "pebblepilot.com",
     "onclckmn.com", "onclcktg.com", "onclckpp.com", "onclckpop.com", "onclckinp.com", "onclmng.com", "yomeno.xyz",
     "canstrm.com", "capndr.com", "korlumo.com", "w.tads.me", "api.tads.me", "backend.tads.me", "a-ads.com",
-    "highrevenueformat.com", "zog.link", "tubecup.net", "ntvpwpush.com", "physicaldad.com", "untimely-hello.com",
+    "highrevenueformat.com", "zog.link", "tubecup.net", "ntvpwpush.com", "physicaldad.com", "untimely-hello.com", "decisive-wait.com", "softsign.pro",
     "silent-basis.pro", "overdue-share.pro", "phoroglopsu.com", "onclckbnr.com", "onclckbn.net", "drimquop.com",
     "metricswpsh.com", "adspector.io", "gstcpx.site", "afrdtech.com", "ad-score.com", "bartcons.com",
     "netdeliveryservice.com", "mcpuwpsh.com", "favorit.work", "hdbkome.com", "hdacode.com", "uuidksinc.net",
