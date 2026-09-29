@@ -581,7 +581,11 @@ fn open_external(app: AppHandle, url: String) {
 
 #[tauri::command]
 async fn check_update(app: AppHandle, manual: Option<bool>) -> Result<bool, String> {
-    let updater = app.updater().map_err(|e| e.to_string())?;
+    // 29.09: X-App-Token - бэкенд отдаёт владельцу кандидата (Mac в режиме TUN ходит с адреса нашего сервера - по адресу не узнать)
+    let tok = load_token();
+    let updater = if tok.is_empty() { app.updater().map_err(|e| e.to_string())? } else {
+        app.updater_builder().header("X-App-Token", tok).map_err(|e| e.to_string())?.build().map_err(|e| e.to_string())?
+    };
     match updater.check().await {
         Ok(Some(update)) => {
             if manual.unwrap_or(false) {
