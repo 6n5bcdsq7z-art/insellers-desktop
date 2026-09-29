@@ -9,6 +9,10 @@ on:
       ver:
         description: "версия кандидата, например 1.0.130"
         required: true
+      force:
+        description: "true - опубликовать и версию СТАРШЕ текущей (откат к стабильной точке, ROLLBACK.md)"
+        required: false
+        default: "false"
 concurrency: { group: desktop-publish, cancel-in-progress: false }
 jobs:
   promote:
@@ -20,13 +24,14 @@ jobs:
           KEY: ${{ secrets.DESKTOP_UPLOAD_KEY }}
           GH_TOKEN: ${{ github.token }}
           VER: ${{ github.event.inputs.ver }}
+          FORCE: ${{ github.event.inputs.force || 'false' }}
         run: |
           set -euo pipefail
           echo "$VER" | grep -Eq '^1\.0\.[0-9]{1,6}$' || { echo "плохая версия"; exit 1; }
           gh api "repos/${{ github.repository }}/contents/candidates/latest-$VER.json?ref=ci-logs" --jq .content | base64 -d > latest.json
           python3 -c "import json;d=json.load(open('latest.json'));assert d['version']=='$VER';print('ok',d['version'],list(d['platforms']))"
           curl -fsS --retry 3 -X POST --data-binary @latest.json -H "Content-Type: application/json" \
-            -H "X-CI-Key: $KEY" "https://vpn.insellers.su/api/ci/desktop-publish"
+            -H "X-CI-Key: $KEY" "https://vpn.insellers.su/api/ci/desktop-publish$([ "$FORCE" = true ] && echo '?force=1')"
           python3 -c "import json;[print(v['url']) for v in json.load(open('latest.json'))['platforms'].values()]" | sort -u | while read u; do
             echo "check $u -> $(curl -s -o /dev/null -w '%{http_code}' -I "$u")"
           done
