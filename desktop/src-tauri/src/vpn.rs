@@ -559,13 +559,39 @@ fn add_probe_rule(cfg: &mut Value) {
 /// Этап 7 (26.09 ночь): путь «Автовыбора» умер - мгновенно на живой выход балансировщика через API ядра (без перезапуска:
 /// системный прокси, TUN и открытые соединения других путей не трогаем). Каждый кандидат проверяем реальной загрузкой 32 КБ.
 /// None - ядро без API / балансировщика или живых нет: тогда обычный перезапуск на следующий путь.
+/// 29.09 (владелец, «липкость»): сервер горячего выхода - имя из тега srv:<сервер>:..., у "proxy" - по совпадению адреса
+/// с выходом srv:* (иначе сам адрес). Адрес выхода для сайтов = сервер.
+fn hot_servers(cfg: &Value) -> std::collections::HashMap<String, String> {
+    let addr = |o: &Value| -> String {
+        o.pointer("/settings/vnext/0/address").or_else(|| o.pointer("/settings/servers/0/address"))
+            .or_else(|| o.pointer("/settings/address")).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    };
+    let outs = cfg["outbounds"].as_array().cloned().unwrap_or_default();
+    let mut by_addr = std::collections::HashMap::new();
+    for o in &outs {
+        if let Some(t) = o["tag"].as_str() { if t.starts_with("srv:") { by_addr.insert(addr(o), t.split(':').nth(1).unwrap_or("").to_string()); } }
+    }
+    let mut m = std::collections::HashMap::new();
+    for o in &outs {
+        let Some(t) = o["tag"].as_str() else { continue };
+        if t.starts_with("srv:") { m.insert(t.to_string(), t.split(':').nth(1).unwrap_or("").to_string()); }
+        else if t == "proxy" { let a = addr(o); m.insert(t.to_string(), by_addr.get(&a).cloned().unwrap_or(a)); }
+    }
+    m
+}
+
 async fn hot_switch(app: &AppHandle, dir: &PathBuf, cur: &str) -> Option<String> {
     let cfg: Value = serde_json::from_slice(&std::fs::read(dir.join("config.json")).ok()?).ok()?;
     let bal = cfg.pointer("/routing/balancers/0/tag").and_then(|v| v.as_str())?.to_string();
-    let tags: Vec<String> = cfg["outbounds"].as_array()?.iter()
+    let mut tags: Vec<String> = cfg["outbounds"].as_array()?.iter()
         .filter_map(|o| o["tag"].as_str().map(|t| t.to_string()))
         .filter(|t| (t == "proxy" || t.starts_with("srv:")) && t != cur && !hot_bad(t))
         .collect();
+    // «липкость» (29.09): сначала другие протоколы ТОГО ЖЕ сервера (адрес выхода не меняется), другой сервер - только если
+    // все протоколы сервера не прошли (sort_by_key устойчивая - внутри групп прежний порядок сервера)
+    let srv = hot_servers(&cfg);
+    let home = srv.get(cur).cloned().unwrap_or_default();
+    tags.sort_by_key(|t| if srv.get(t).map(|x| *x == home).unwrap_or(false) { 0 } else { 1 });
     for t in tags {
         let args: Vec<String> = vec!["api".into(), "bo".into(), format!("--server=127.0.0.1:{API_PORT}"), "-b".into(), bal.clone(), t.clone()];
         let out = app.shell().sidecar("xray").ok()?.args(args).output().await.ok()?;
