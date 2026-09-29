@@ -11,6 +11,10 @@ on:
         description: "Что нового (показывается в обновлении)"
         required: false
         default: ""
+      stage:
+        description: "candidate - собрать и загрузить, людям НЕ публиковать (выпуск - workflow promote); all - сразу всем"
+        required: false
+        default: "all"
   # расписание GitHub (cron) ни разу не сработало - ночную сборку запускает таймер Hetzner insellers-desktop-nightly (04:15 UTC)
 
 # новая сборка отменяет ещё идущую старую (публикация при этом строго по очереди)
@@ -197,6 +201,8 @@ jobs:
         env:
           KEY: ${{ secrets.DESKTOP_UPLOAD_KEY }}
           NOTES: ${{ github.event.inputs.notes }}
+          STAGE: ${{ github.event.inputs.stage || 'all' }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           cd art && ls -la
@@ -240,6 +246,14 @@ jobs:
               latest["platforms"]["linux-x86_64"] = {"signature": sig("$APPIMG.sig"), "url": base + "INSELLERS-VPN.AppImage"}
           json.dump(latest, open("latest.json", "w"), ensure_ascii=False)
           PY
+          # 29.09 (владелец: сборки каждые 3 ч, раскатка шагами): кандидат - latest.json в ветку ci-logs, людям не публикуем
+          if [ "$STAGE" = "candidate" ]; then
+            B64=$(base64 -w0 latest.json)
+            gh api -X PUT "repos/${{ github.repository }}/contents/candidates/latest-$VER.json" -f message="candidate $VER" \
+              -f branch=ci-logs -f content="$B64" >/dev/null
+            echo "candidate $VER (людям не опубликовано)" | tee -a ../publish.log
+            exit 0
+          fi
           curl -fsS --retry 3 -X POST --data-binary @latest.json -H "Content-Type: application/json" \
             -H "X-CI-Key: $KEY" "https://vpn.insellers.su/api/ci/desktop-publish" | tee -a ../publish.log
           echo "published $VER" | tee -a ../publish.log

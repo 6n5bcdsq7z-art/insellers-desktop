@@ -1,0 +1,32 @@
+name: promote
+# 29.09 (владелец: раскатка шагами): выпустить людям собранного кандидата - latest.json из ветки ci-logs (candidates/) ->
+# /api/ci/desktop-publish. Запускает Hetzner (insellers-app-promote) после проверки у владельца; откат - ver прежней версии.
+permissions:
+  contents: read
+on:
+  workflow_dispatch:
+    inputs:
+      ver:
+        description: "версия кандидата, например 1.0.130"
+        required: true
+concurrency: { group: desktop-publish, cancel-in-progress: false }
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Опубликовать кандидата
+        env:
+          KEY: ${{ secrets.DESKTOP_UPLOAD_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ github.event.inputs.ver }}
+        run: |
+          set -euo pipefail
+          echo "$VER" | grep -Eq '^1\.0\.[0-9]{1,6}$' || { echo "плохая версия"; exit 1; }
+          gh api "repos/${{ github.repository }}/contents/candidates/latest-$VER.json?ref=ci-logs" --jq .content | base64 -d > latest.json
+          python3 -c "import json;d=json.load(open('latest.json'));assert d['version']=='$VER';print('ok',d['version'],list(d['platforms']))"
+          curl -fsS --retry 3 -X POST --data-binary @latest.json -H "Content-Type: application/json" \
+            -H "X-CI-Key: $KEY" "https://vpn.insellers.su/api/ci/desktop-publish"
+          python3 -c "import json;[print(v['url']) for v in json.load(open('latest.json'))['platforms'].values()]" | sort -u | while read u; do
+            echo "check $u -> $(curl -s -o /dev/null -w '%{http_code}' -I "$u")"
+          done
