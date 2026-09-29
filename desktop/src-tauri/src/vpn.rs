@@ -691,6 +691,80 @@ async fn probe_real_t(size: &str, secs: u64) -> (bool, u64, u64, String) {
 }
 fn kbps(bytes: u64, ms: u64) -> u64 { if ms == 0 { 0 } else { bytes * 1000 / ms / 1024 } }
 
+/// 29.09 (владелец: Mac после сна «Подключено», а интернета нет): проверка ЧЕРЕЗ туннель - (ok, мс, как). Xray - реальная
+/// загрузка 32 КБ с нашего сервера через путь (вход probe-in) или generate_204 через локальный вход; AmneziaWG - generate_204
+/// через локальный вход (у wireproxy нет входа проверки). До ~10 с. Её же вызывает страница: InsellersNative.probe().
+pub async fn tunnel_check() -> (bool, u64, String) {
+    let t0 = std::time::Instant::now();
+    if cur_path() != "awg" {
+        let (ok, _b, ms, why) = probe_real_t("32k", 6).await;
+        if ok { return (true, ms, "real32k".into()); }
+        if why == "core" { return (false, ms, "core".into()); }
+    }
+    let client = match reqwest::Proxy::all(format!("http://127.0.0.1:{HTTP_PORT}"))
+        .and_then(|p| reqwest::Client::builder().proxy(p).timeout(Duration::from_secs(4)).build()) { Ok(c) => c, Err(_) => return (false, 0, "io".into()) };
+    for u in ["http://connectivitycheck.gstatic.com/generate_204", "http://cp.cloudflare.com/generate_204"] {
+        if let Ok(r) = client.get(u).send().await {
+            let s = r.status().as_u16();
+            if s == 204 || s == 200 { return (true, t0.elapsed().as_millis() as u64, "204".into()); }
+        }
+    }
+    (false, t0.elapsed().as_millis() as u64, "fail".into())
+}
+
+static LAST_FORCED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Переподключение с повтором: сети ещё нет (сразу после сна) - не сдаёмся ошибкой, повтор раз в 30 с до 10 мин.
+fn reconnect_retry(app: &AppHandle, t_ev: u64, reason: &'static str) {
+    let b = app.clone();
+    std::thread::spawn(move || {
+        for i in 0..20 {
+            if !wanted(&b) { return; }
+            match tauri::async_runtime::block_on(start(b.clone())) {
+                Ok(()) => {
+                    let ok = tauri::async_runtime::block_on(tunnel_check()).0;
+                    crate::remote_log("vpn.wake_ok", json!({"reason": reason, "secs": crate::now_ms().saturating_sub(t_ev) / 1000,
+                        "how": "reconnect", "ok": ok, "try": i}));
+                    notify(&b, "connected", "Соединение восстановлено");
+                    return;
+                }
+                Err(e) if e == "CANCELLED" || e == "BUSY" => return,
+                Err(e) => {
+                    if i == 19 { if !crate::pref("killswitch") && wanted(&b) { set_proxy(false); } if wanted(&b) { notify(&b, "error", &e); } return; }
+                    notify(&b, "connecting", "Нет сети - ждём и переподключаемся…");
+                    std::thread::sleep(Duration::from_secs(30));
+                }
+            }
+        }
+    });
+}
+
+/// Пробуждение системы / смена сети: через 3 с проверка через туннель (2 попытки); не прошла - «Переподключаемся…» и полное
+/// переподключение по Автовыбору (новое ядро и TUN), не чаще раза в 60 с. Итог - vpn.wake_ok / vpn.wake_reconnect (секунды от события).
+fn wake_recover(app: &AppHandle, gen: u32, reason: &'static str) {
+    let w = app.clone();
+    let t_ev = crate::now_ms();
+    tauri::async_runtime::spawn(async move {
+        tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_secs(3))).await.ok();
+        for i in 0..2 {
+            if cur_gen(&w) != gen || !wanted(&w) { return; }
+            let (ok, ms, how) = tunnel_check().await;
+            if ok {
+                crate::remote_log("vpn.wake_ok", json!({"reason": reason, "secs": crate::now_ms().saturating_sub(t_ev) / 1000, "ms": ms, "how": how, "try": i}));
+                return;
+            }
+            tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_secs(3))).await.ok();
+        }
+        if cur_gen(&w) != gen || !wanted(&w) { return; }
+        let now = crate::now_ms();
+        if now.saturating_sub(LAST_FORCED.load(std::sync::atomic::Ordering::SeqCst)) < 60_000 { return; }
+        LAST_FORCED.store(now, std::sync::atomic::Ordering::SeqCst);
+        crate::remote_log("vpn.wake_reconnect", json!({"reason": reason, "path": cur_path()}));
+        notify(&w, "connecting", "Переподключаемся…");
+        reconnect_retry(&w, t_ev, reason);
+    });
+}
+
 /// Метка пути конфигурации: «auto» - если в ней балансировщик, иначе тег первого выхода-прокси.
 fn path_tag(c: &Value) -> String {
     if c.pointer("/routing/balancers").and_then(|b| b.as_array()).map(|a| !a.is_empty()).unwrap_or(false) { return "auto".into(); }
@@ -1302,6 +1376,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
             let now = crate::now_ms();
             if now.saturating_sub(last_tick) > 30_000 {
                 crate::remote_log("sys.wake", json!({"gap_s": now.saturating_sub(last_tick) / 1000, "tun": crate::tun::active()}));
+                wake_recover(&w, watch_gen, "wake");          // 29.09: после сна - сразу проверка через туннель
             }
             last_tick = now;
             tick += 1;
@@ -1309,6 +1384,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                 let gw = tauri::async_runtime::spawn_blocking(default_gateway).await.unwrap_or_default();
                 if !last_gw.is_empty() && gw != last_gw {
                     crate::remote_log("sys.net", json!({"gw_changed": true, "has_gw": !gw.is_empty(), "tun": crate::tun::active()}));
+                    if !gw.is_empty() { wake_recover(&w, watch_gen, "net"); }   // 29.09: сменилась сеть - проверка через туннель
                 }
                 if !gw.is_empty() || !last_gw.is_empty() { last_gw = gw; }
             }
@@ -1593,6 +1669,17 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                     }
                 }
                 if fails >= 3 && !degraded { degraded = true; mark(&h, 2); notify(&h, "degraded", "Нет ответа от сервера - восстанавливаем соединение"); }
+                // 29.09 (владелец: Mac после сна «Подключено» без интернета): в режиме TUN «интернет без VPN» берётся у помощника
+                // и после сна бывает устаревшим - путь тогда не менялся никогда. 4 отказа подряд (~20 с) - полное переподключение
+                // (новое ядро и TUN), не чаще раза в 2 мин.
+                let nowf = crate::now_ms();
+                if fails >= 4 && nowf.saturating_sub(LAST_FORCED.load(std::sync::atomic::Ordering::SeqCst)) > 120_000 {
+                    LAST_FORCED.store(nowf, std::sync::atomic::Ordering::SeqCst);
+                    crate::remote_log("vpn.nonet", json!({"how": "health", "fails": fails, "path": cur_path(), "awg": is_awg}));
+                    notify(&h, "connecting", "Переподключаемся…");
+                    reconnect_retry(&h, nowf, "health");
+                    break;
+                }
             }
             let secs = if fails > 0 { 5 } else { 30 };
             tauri::async_runtime::spawn_blocking(move || std::thread::sleep(Duration::from_secs(secs))).await.ok();

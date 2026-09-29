@@ -130,13 +130,19 @@ pub fn install_id() -> String {
 }
 
 /// Диагностический лог на сервер (без секретов).
+// 29.09: события без сети (после сна) терялись - за 7 дней ни одного sys.wake. Не дошло - в очередь (до 100), уходит со следующим.
+static LOG_QUEUE: std::sync::Mutex<Vec<serde_json::Value>> = std::sync::Mutex::new(Vec::new());
+
 pub fn remote_log(ev: &str, data: serde_json::Value) {
     let ev = ev.to_string();
     tauri::async_runtime::spawn(async move {
         let os = if cfg!(target_os = "macos") { "mac" } else if cfg!(target_os = "windows") { "windows" } else { "linux" };
+        let this = serde_json::json!({"ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0), "ev": ev, "data": data});
+        let mut evs: Vec<serde_json::Value> = std::mem::take(&mut *LOG_QUEUE.lock().unwrap());
+        evs.push(this);
         let body = serde_json::json!({
             "ctx": {"install": install_id(), "platform": format!("desktop-{os}-native"), "version": env!("CARGO_PKG_VERSION")},
-            "events": [{"ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0), "ev": ev, "data": data}]
+            "events": evs.clone()
         });
         // 26.09: сначала мимо системного прокси (= нашего туннеля): событие «путь умер» через мёртвый путь не дошло бы,
         // и сервер видит IP провайдера, а не нашего сервера. Не вышло напрямую - через системный прокси.
@@ -147,9 +153,13 @@ pub fn remote_log(ev: &str, data: serde_json::Value) {
             if let Ok(c) = b.build() {
                 let mut rq = c.post(format!("{BASE}/api/app/log")).json(&body);
                 if !t.is_empty() { rq = rq.header("X-App-Token", t.clone()); }
-                if rq.send().await.map(|r| r.status().is_success()).unwrap_or(false) { break; }
+                if rq.send().await.map(|r| r.status().is_success()).unwrap_or(false) { return; }
             }
         }
+        let mut q = LOG_QUEUE.lock().unwrap();
+        let mut keep = evs; keep.extend(q.drain(..));
+        let n = keep.len();
+        *q = keep.into_iter().skip(n.saturating_sub(100)).collect();
     });
 }
 
@@ -209,7 +219,9 @@ fn init_script(token: &str, version: &str) -> String {
     connectGuest: function (u, t) {{ inv("vpn_guest", {{ url: String(u), until: String(t) }}); }},
     getGuestUntil: function () {{ var g = +window.__INS_GUEST_UNTIL || 0; return String(g > Date.now() ? g : 0); }},
     getVpnState: function () {{ return window.__INS_VPN || "disconnected"; }},
-    setAccessUntil: function (ms) {{ inv("set_access", {{ ms: String(ms) }}); }}
+    setAccessUntil: function (ms) {{ inv("set_access", {{ ms: String(ms) }}); }},
+    // 29.09: проверка ЧЕРЕЗ туннель из ядра - ответ событием window "ins:probe" {{ok, ms, how}} и в window.__INS_PROBE
+    probe: function () {{ inv("probe"); }}
   }};
   // 29.09 (владелец): во внешний браузер - только переходы по нажатию человека (ссылка, window.open из клика). iframe и
   // фоновые запросы рекламных SDK (GigaPub pxl.iframe, VAST OnClickA, RichAds) остаются внутри окна.
@@ -448,6 +460,13 @@ async fn native_cmd(app: AppHandle, cmd: &str, arg: serde_json::Value) {
         }
         "vpn_disconnect" => vpn_disconnect(app),
         "set_pref" => set_pref(&app, arg["key"].as_str().unwrap_or_default(), arg["value"].as_bool().unwrap_or(false)),
+        "probe" => {
+            let (ok, ms, how) = vpn::tunnel_check().await;
+            if let Some(w) = app.get_webview_window("main") {
+                let d = serde_json::json!({"ok": ok, "ms": ms, "how": how}).to_string();
+                let _ = w.eval(&format!("window.__INS_PROBE={d};window.dispatchEvent(new CustomEvent('ins:probe',{{detail:{d}}}))"));
+            }
+        }
         "set_access" => ACCESS_UNTIL.store(arg["ms"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0), std::sync::atomic::Ordering::Relaxed),
         _ => {}
     }
