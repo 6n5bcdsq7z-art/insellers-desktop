@@ -241,6 +241,10 @@ fn init_script(token: &str, version: &str) -> String {
 "#)
 }
 
+// 29.09 (владелец): Windows (WebView2 шлёт UA Edge с «Edg/…») - как обычный Chrome для всей страницы: рекламные сети
+// охотнее отдают ролики браузеру, чем встроенному окну. Версия - как у Chromium текущих устройств (журналы, 29.09: 151-156).
+#[cfg(target_os = "windows")]
+const WIN_CHROME_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36";
 #[cfg(target_os = "macos")]
 const MAC_SAFARI_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15";
 
@@ -258,6 +262,8 @@ fn build_main(app: &AppHandle) -> tauri::Result<()> {
     // такой браузер ненастоящим и не отдают показ (28 «nofill» из 28). Ставим UA обычного Safari той же платформы.
     #[cfg(target_os = "macos")]
     let builder = builder.user_agent(MAC_SAFARI_UA);
+    #[cfg(target_os = "windows")]
+    let builder = builder.user_agent(WIN_CHROME_UA);
     builder
         .title("INSELLERS VPN")
         .background_color(tauri::window::Color(0, 0, 0, 255))
