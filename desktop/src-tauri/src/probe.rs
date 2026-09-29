@@ -175,26 +175,30 @@ async fn get_via(port: u16, url: &str, max: usize, secs: u64) -> (u64, usize, St
 
 pub async fn run_variants(app: &tauri::AppHandle, dir: &std::path::Path, token: String) {
     use tauri_plugin_shell::ShellExt;
-    if token.is_empty() || low_power() || battery_low() || user_busy().await { return; }
+    // 29.09 (владелец: замеров с устройств 0 за 7 суток) - каждая причина пропуска и итог отправки - в журнал
+    let skip = |why: &str| crate::remote_log("probe.variants", json!({"ok": false, "stage": "skip", "why": why}));
+    if token.is_empty() { skip("no_token"); return; }
+    if low_power() || battery_low() { skip("power"); return; }
+    if user_busy().await { skip("user_busy"); return; }
     let direct = match reqwest::Client::builder().no_proxy().user_agent(format!("InsellersVPN/desktop-{}", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(15)).build() { Ok(c) => c, Err(_) => return };
-    let sub = match crate::vpn::sub_url(&direct, &token).await { Ok(s) => s, Err(_) => return };
+    let sub = match crate::vpn::sub_url(&direct, &token).await { Ok(s) => s, Err(_) => { skip("no_sub"); return; } };
     let base = sub.split('?').next().unwrap_or("").to_string();
     let port: u16 = 20000 + (crate::now_ms() % 20000) as u16;
     let plan: Value = match direct.get(format!("{base}?format=probe&port={port}&net=wifi")).send().await {
         Ok(r) if r.status().is_success() => r.json().await.unwrap_or(Value::Null),
-        _ => return,
+        _ => { skip("no_plan"); return; }
     };
     let vs = plan["variants"].as_array().cloned().unwrap_or_default();
-    if vs.is_empty() { return; }
+    if vs.is_empty() { skip("empty_plan"); return; }
     let _ = std::fs::write(dir.join("vprobe_last"), crate::now_ms().to_string());
     let _ = std::fs::write(dir.join("vprobe_every_h"), plan["every_h"].as_u64().unwrap_or(1).to_string());
     let path = dir.join("probe-variants.json");
-    if std::fs::write(&path, plan["config"].to_string()).is_err() { return; }
+    if std::fs::write(&path, plan["config"].to_string()).is_err() { skip("write_config"); return; }
     let ps = path.to_string_lossy().to_string();
     let (rx, child) = match app.shell().sidecar("xray").and_then(|c| c.args(["run", "-c", ps.as_str()]).spawn()) {
         Ok(x) => x,
-        Err(_) => return,
+        Err(e) => { skip(&format!("spawn: {}", e.to_string().chars().take(100).collect::<String>())); return; }
     };
     crate::tokio_sleep(2).await;
     let lat = plan["urls"]["latency"].as_str().unwrap_or("https://vpn.insellers.su/probe/204").to_string();
@@ -217,8 +221,11 @@ pub async fn run_variants(app: &tauri::AppHandle, dir: &std::path::Path, token: 
     let _ = child.kill();
     drop(rx);
     let _ = std::fs::remove_file(&path);
+    let n = out.len();
+    let passed = out.iter().filter(|r| r["ok"].as_bool().unwrap_or(false)).count();
     let body = json!({"net": "", "device": format!("ins-{}", crate::install_id()), "platform": "desktop",
                       "version": env!("CARGO_PKG_VERSION"), "results": out});
-    let _ = direct.post(format!("{}/api/app/variant-probe", crate::BASE)).header("X-App-Token", &token)
-        .json(&body).send().await;
+    let st = match direct.post(format!("{}/api/app/variant-probe", crate::BASE)).header("X-App-Token", &token)
+        .json(&body).send().await { Ok(r) => r.status().as_u16().to_string(), Err(e) => e.to_string().chars().take(100).collect() };
+    crate::remote_log("probe.variants", json!({"ok": st == "200", "n": n, "passed": passed, "post": st}));
 }
