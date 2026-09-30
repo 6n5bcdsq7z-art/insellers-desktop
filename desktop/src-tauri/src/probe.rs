@@ -108,6 +108,21 @@ pub async fn run_once(token: String, dir: std::path::PathBuf) {
     if plan["funnel"].is_object() { funnel(&client, &plan["funnel"], &token, &dir, false).await; }
 }
 
+/// 30.09: после сбоя подключения - воронка (force), если в плане сервера она есть; не чаще раза в 15 мин.
+pub async fn after_failure(dir: std::path::PathBuf) {
+    if !stamp_due(&dir, "funnel_fail", 15 * 60_000) { return; }
+    let token = crate::load_token();
+    if token.is_empty() { return; }
+    let client = match reqwest::Client::builder().no_proxy().user_agent(format!("InsellersVPN/desktop-{}", env!("CARGO_PKG_VERSION")))
+        .build() { Ok(c) => c, Err(_) => return };
+    let plan: Value = match client.get(format!("{}/api/app/probe-plan", crate::BASE)).header("X-App-Token", &token)
+        .timeout(Duration::from_secs(10)).send().await {
+        Ok(r) if r.status().is_success() => r.json().await.unwrap_or(Value::Null),
+        _ => return,
+    };
+    if plan["funnel"].is_object() { funnel(&client, &plan["funnel"], &token, &dir, true).await; }
+}
+
 async fn post_measure(client: &reqwest::Client, token: &str, kind: &str, data: Value) {
     let body = json!({"kind": kind, "net": "", "device": format!("ins-{}", crate::install_id()), "platform": "desktop",
                       "version": env!("CARGO_PKG_VERSION"), "path": crate::vpn::cur_path(), "data": data});
@@ -261,7 +276,7 @@ pub async fn funnel(client: &reqwest::Client, f: &Value, token: &str, dir: &std:
         steps.push(json!({"step": "whitelist", "ok": normal || !allowed,
                           "why": if !normal && allowed { "похоже на белые списки: обычный сайт закрыт, разрешённый открыт" } else { "" }}));
     }
-    post_measure(client, token, "funnel", json!({"steps": steps, "force": force})).await;
+    post_measure(client, token, "funnel", json!({"steps": steps, "force": force, "why": if force { "failure" } else { "schedule" }})).await;
 }
 
 /// Нужно ли мерить сейчас (раз в 60 мин; переподключения не учащают).

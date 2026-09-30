@@ -1189,6 +1189,12 @@ fn set_proxy(enable: bool) {
 pub fn notify(app: &AppHandle, state: &str, msg: &str) { notify_code(app, state, msg, ""); }
 
 pub fn notify_code(app: &AppHandle, state: &str, msg: &str, code: &str) {
+    // 30.09: сбой подключения - воронка связи мимо туннеля (если сервер её включил этому человеку), не чаще раза в 15 мин
+    if state == "error" && code != "guest_expired" {
+        if let Ok(d) = data_dir(app) {
+            tauri::async_runtime::spawn(async move { crate::probe::after_failure(d).await; });
+        }
+    }
     if let Some(w) = app.get_webview_window("main") {
         let js = format!(
             "window.__INS_VPN={s};if({s}==='connected'&&!window.__INS_CONN_AT)window.__INS_CONN_AT=Date.now();if({s}==='disconnected')window.__INS_CONN_AT=0;window.dispatchEvent(new CustomEvent('ins:vpn',{{detail:{{state:{s},msg:{m},code:{c}}}}}))",
