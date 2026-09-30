@@ -182,6 +182,69 @@ const WD_SILENT_MS: u64 = 15_000;
 /// приветствие шифрования в 2 пакета (у WebKit и WebView2 - постквантовый ключ), а запросы самого приложения проходят.
 /// macOS - прокси окна только с macOS 14. Журнал desktop.page_fallback {why, mac}.
 static PAGE_PROXY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static WIN_BG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 30.09 (владелец: нагрев/батарея): процессорное время нашего процесса и его ядер (xray / sing-box / wireproxy / помощник) - `ps`
+/// (Mac, Linux), мс накопленно. Windows - нет (None).
+fn proc_cpu_ms() -> Option<(u64, u64)> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let me = std::process::id();
+        let out = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid=,time="]).output().ok()?;
+        let txt = String::from_utf8_lossy(&out.stdout).to_string();
+        let mut rows: Vec<(u32, u32, u64)> = Vec::new();
+        for l in txt.lines() {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            if f.len() < 3 { continue; }
+            let (Ok(pid), Ok(ppid)) = (f[0].parse::<u32>(), f[1].parse::<u32>()) else { continue };
+            // время: [[дд-]чч:]мм:сс[.сс]
+            let t = f[2]; let (d, rest) = t.split_once('-').map(|(a, b)| (a.parse::<u64>().unwrap_or(0), b)).unwrap_or((0, t));
+            let parts: Vec<f64> = rest.split(':').map(|x| x.parse::<f64>().unwrap_or(0.0)).collect();
+            let secs = parts.iter().fold(0.0, |acc, x| acc * 60.0 + x) + d as f64 * 86400.0;
+            rows.push((pid, ppid, (secs * 1000.0) as u64));
+        }
+        let own = rows.iter().find(|r| r.0 == me).map(|r| r.2).unwrap_or(0);
+        let mut kids: Vec<u32> = vec![me]; let mut core = 0u64; let mut i = 0;
+        while i < kids.len() {
+            let p = kids[i];
+            for r in rows.iter().filter(|r| r.1 == p) { kids.push(r.0); core += r.2; }
+            i += 1;
+            if kids.len() > 64 { break; }
+        }
+        return Some((own, core));
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+fn battery() -> (i64, bool) {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(o) = std::process::Command::new("pmset").args(["-g", "batt"]).output() {
+            let t = String::from_utf8_lossy(&o.stdout).to_string();
+            let pct = t.split('%').next().and_then(|a| a.rsplit(|c: char| !c.is_ascii_digit()).next()).and_then(|x| x.parse().ok()).unwrap_or(-1);
+            return (pct, t.contains("AC Power"));
+        }
+    }
+    (-1, false)
+}
+
+/// Раз в 5 мин - desktop.power: процессор приложения и ядер за период, окно (на экране / свёрнуто / скрыто), батарея. Сводка - ops/diag/power.py.
+fn start_power(h: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut prev = proc_cpu_ms(); let mut t0 = now_ms();
+        loop {
+            tokio_sleep(300).await;
+            let cur = proc_cpu_ms(); let t = now_ms();
+            let (fg, vis) = h.get_webview_window("main").map(|w| (w.is_focused().unwrap_or(false), w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))).unwrap_or((false, false));
+            let (bat, chg) = battery();
+            let (cpu, core) = match (prev, cur) { (Some(a), Some(b)) => (b.0.saturating_sub(a.0) as i64, b.1.saturating_sub(a.1) as i64), _ => (-1, -1) };
+            remote_log("desktop.power", serde_json::json!({"cpu_ms": cpu, "core_ms": core, "sec": (t - t0) / 1000, "fg": fg,
+                "screen": vis, "vpn": vpn_running(&h), "bat": bat, "chg": chg}));
+            prev = cur; t0 = t;
+        }
+    });
+}
 static PAGE_DONE_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn mac_major() -> u32 {
@@ -289,6 +352,11 @@ fn start_watchdog(h: AppHandle) {
             if now.saturating_sub(last_tick) > 20_000 { SEEN_AT.store(now, Relaxed); }
             last_tick = now;
             let Some(w) = h.get_webview_window("main") else { continue };
+            // 30.09 (владелец: нагрев): окно скрыто/свёрнуто - странице флаг «в фоне» (анимации и реклама в полосе стоят)
+            let bg = !w.is_visible().unwrap_or(true) || w.is_minimized().unwrap_or(false);
+            if bg != WIN_BG.swap(bg, Relaxed) {
+                let _ = w.eval(&format!("window.__INS_BG={bg};window.dispatchEvent(new CustomEvent('ins:bg',{{detail:{{bg:{bg}}}}}))"));
+            }
             let shown = w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false) && w.is_focused().unwrap_or(false);
             if !shown { continue; }
             let on_page = w.url().map(|u| u.host_str() == Some(HOST)).unwrap_or(false);
@@ -968,6 +1036,7 @@ fn main() {
             }
             start_pulse(app.handle().clone());
             start_watchdog(app.handle().clone());
+            start_power(app.handle().clone());
             if let Err(e) = setup_tray(app) { remote_log("tray.error", serde_json::json!({"err": e.to_string()})); }
             apply_autostart(app.handle(), pref("autoconnect"));
             // VPN был включён до обновления — включаем снова, даже без автоподключения
