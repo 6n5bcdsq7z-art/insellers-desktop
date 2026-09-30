@@ -965,6 +965,8 @@ const AD_DIRECT: &[&str] = &[
     "acscdn.com", "youradexchange.com",
     // 30.09 14:50: MyBid (баннер) - скрипт/ставки/креативы (AS39572); mbdippex/rtbrenab/zivroq на Hetzner - через туннель
     "mbidadm.com", "mbidtg.com", "cabnnr.com",
+    // 30.09 15:10: AdsBitvex (ролики) - Cloudflare, только по имени
+    "adsbitvex.com",
     "sad.adsgram.ai", "api.adsgram.ai", "tma.adsgram.ai", "image.adsgram.ai", "images.adsgram.ai", "adsgram.me",
     "libtl.com", "onclckvd.com", "onclckstr.com", "onclckmetrics.com", "richinfo.co", "adx1.com", "4armn.com",
     "convers.link", "7ool.net", "adp3.net", "munqu.com", "cdn.giga.pub", "mndx1.com", "mvdomnd.com", "pebblepilot.com",
