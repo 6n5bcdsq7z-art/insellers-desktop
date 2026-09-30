@@ -105,7 +105,158 @@ pub async fn run_once(token: String, dir: std::path::PathBuf) {
         .timeout(Duration::from_secs(15)).json(&body).send().await;
     // 30.09 (Мозг v2): скорость и воронка - только если сервер включил их этому человеку (план)
     if plan["speed"].is_object() { speed(&client, &plan["speed"], &token, &dir).await; }
-    if plan["funnel"].is_object() { funnel(&client, &plan["funnel"], &token, &dir, false).await; }
+    if plan["funnel"].is_object() { funnel(&client, &plan["funnel"], &token, &dir, false, &plan["levels"]["funnel_extra"]).await; }
+    // 01.10 (MOZG v3, этап 1.3): пробы трёх уровней - только если сервер включил (PROBE_LEVELS)
+    if plan["levels"].is_object() {
+        if plan["levels"]["l1"].is_object() { level(&client, &plan["levels"]["l1"], &token, &dir, false).await; }
+        if plan["levels"]["l2"].is_object() { level(&client, &plan["levels"]["l2"], &token, &dir, true).await; }
+        if plan["levels"]["udp"].is_object() { udp_ladder(&client, &plan["levels"]["udp"], &token, &dir).await; }
+    }
+}
+
+fn ping_stats(mut v: Vec<u64>) -> Value {
+    v.sort_unstable();
+    let mut o = json!({"ping_ms": v});
+    if !v.is_empty() {
+        o["ping_p50"] = json!(v[v.len() / 2]);
+        o["ping_p95"] = json!(v[((0.95 * (v.len() - 1) as f64) as usize).min(v.len() - 1)]);
+    }
+    o
+}
+
+/// L1 (01.10): раз в every_min (55-95, случайно, от сервера) - 3 пинга по одному соединению через текущий путь и 32 КБ;
+/// L2 (big = true): раз в every_h (5-11) - 256-512 КБ + отдача 128 КБ, только при активном экране (на ПК = не в энергосбережении
+/// и не на батарее < 30%). Трафик: L1 ~35 КБ, L2 ~0,7 МБ за раунд.
+async fn level(direct: &reqwest::Client, s: &Value, token: &str, dir: &std::path::Path, big: bool) {
+    if low_power() || (big && battery_low()) { return; }
+    let every = if big { s["every_h"].as_u64().unwrap_or(8).clamp(1, 48) * 3600_000 } else { s["every_min"].as_u64().unwrap_or(75).clamp(30, 240) * 60_000 };
+    if !stamp_due(dir, if big { "l2_last" } else { "l1_last" }, every) { return; }
+    let port = if crate::vpn::cur_path() == "awg" { crate::vpn::HTTP_PORT } else { crate::vpn::PROBE_PORT };
+    let secs = s["timeout_s"].as_u64().unwrap_or(if big { 60 } else { 25 }).clamp(5, 90);
+    let c = match reqwest::Proxy::all(format!("http://127.0.0.1:{port}"))
+        .and_then(|p| reqwest::Client::builder().proxy(p).pool_max_idle_per_host(1).timeout(Duration::from_secs(secs)).build()) { Ok(c) => c, Err(_) => return };
+    let mut pings = Vec::new();
+    let pu = s["ping_url"].as_str().unwrap_or("https://vpn.insellers.su/probe/204").to_string();
+    for i in 0..s["ping_n"].as_u64().unwrap_or(3).clamp(1, 5) {
+        let t0 = Instant::now();
+        if let Ok(r) = c.get(format!("{pu}?r={i}")).send().await {
+            if r.status().is_success() { let _ = r.bytes().await; pings.push(t0.elapsed().as_millis() as u64); }
+        }
+    }
+    let mut d = ping_stats(pings);
+    let (mut db, mut dms, mut dok) = (0u64, 0u64, 0u64);
+    for (i, u) in s["urls"].as_array().cloned().unwrap_or_default().iter().enumerate() {
+        let t0 = Instant::now();
+        if let Ok(mut r) = c.get(format!("{}?r={i}", u.as_str().unwrap_or(""))).send().await {
+            let ok = r.status().is_success();
+            while let Ok(Some(b)) = r.chunk().await { db += b.len() as u64; }
+            if ok { dok += 1; }
+        }
+        dms += t0.elapsed().as_millis() as u64;
+    }
+    d["want_bytes"] = json!(s["want_bytes"].as_u64().unwrap_or(0));
+    d["down_bytes"] = json!(db); d["down_ms"] = json!(dms); d["down_ok"] = json!(dok);
+    if big {
+        if let Some(up) = s["up_url"].as_str().filter(|x| !x.is_empty()) {
+            let n = (s["up_kb"].as_u64().unwrap_or(128).clamp(16, 1024) * 1024) as usize;
+            let body: Vec<u8> = (0..n).map(|i| (i.wrapping_mul(2654435761) >> 7) as u8).collect();
+            let t0 = Instant::now();
+            let code = match c.post(up).header("Content-Type", "application/octet-stream").body(body).send().await { Ok(r) => r.status().as_u16(), Err(_) => 0 };
+            d["up_bytes"] = json!(if (200..300).contains(&code) { n } else { 0 });
+            d["up_ms"] = json!(t0.elapsed().as_millis() as u64);
+            d["up_code"] = json!(code);
+        }
+    }
+    post_measure(direct, token, if big { "l2" } else { "l1" }, d).await;
+}
+
+/// Лестница UDP (01.10), мимо туннеля: сырой UDP = STUN-запрос (наши порты на чужой пакет молчат: salamander / junk AWG), рядом TCP до
+/// наших серверов - UDP не ходит при живом TCP = «UDP закрыт»; рукопожатие QUIC/Hysteria - по событиям пути hy2 (L0). ~1 КБ, раз в every_h.
+async fn udp_ladder(direct: &reqwest::Client, s: &Value, token: &str, dir: &std::path::Path) {
+    if !stamp_due(dir, "udp_last", s["every_h"].as_u64().unwrap_or(6).clamp(1, 48) * 3600_000) { return; }
+    let to = Duration::from_secs(s["timeout_s"].as_u64().unwrap_or(4).clamp(1, 10));
+    let stun: Vec<(String, u16)> = s["stun"].as_array().cloned().unwrap_or_default().iter()
+        .map(|x| (x["host"].as_str().unwrap_or("").to_string(), x["port"].as_u64().unwrap_or(3478) as u16)).collect();
+    let targets: Vec<Value> = s["targets"].as_array().cloned().unwrap_or_default();
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        use std::net::{ToSocketAddrs, UdpSocket};
+        let (mut udp_ok, mut udp_ms) = (false, -1i64);
+        for (host, port) in stun {
+            let t0 = Instant::now();
+            let ok = (|| -> Result<bool, String> {
+                let addr = format!("{host}:{port}").to_socket_addrs().map_err(|e| e.to_string())?.find(|a| a.is_ipv4()).ok_or("нет адреса")?;
+                let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+                sock.set_read_timeout(Some(to)).ok();
+                let mut req = [0u8; 20];
+                req[1] = 1; req[4] = 0x21; req[5] = 0x12; req[6] = 0xA4; req[7] = 0x42;
+                let seed = crate::now_ms();
+                for (i, b) in req[8..].iter_mut().enumerate() { *b = ((seed >> (i % 8 * 8)) as u8) ^ (i as u8 * 37); }
+                sock.send_to(&req, addr).map_err(|e| e.to_string())?;
+                let mut buf = [0u8; 256];
+                let (n, _) = sock.recv_from(&mut buf).map_err(|e| e.to_string())?;
+                Ok(n >= 20 && buf[0] == 1 && buf[1] == 1)
+            })();
+            if ok.unwrap_or(false) { udp_ok = true; udp_ms = t0.elapsed().as_millis() as i64; break; }
+        }
+        let mut out = Vec::new();
+        for t in targets {
+            let ip: IpAddr = match t["ip"].as_str().unwrap_or("").parse() { Ok(a) => a, Err(_) => continue };
+            let tcp_ok = TcpStream::connect_timeout(&SocketAddr::new(ip, 443), to).is_ok();
+            out.push(json!({"server": t["server"], "transport": t["transport"].as_str().unwrap_or("hy2"), "port": t["port"],
+                            "udp_ok": udp_ok, "udp_ms": udp_ms, "tcp_ok": tcp_ok}));
+        }
+        json!({"stun_ok": udp_ok, "stun_ms": udp_ms, "targets": out})
+    }).await.unwrap_or(Value::Null);
+    if res.is_object() { post_measure(direct, token, "udp", res).await; }
+}
+
+/// 01.10: рукопожатие TLS без проверки сертификата - только «ответил ли сервер на ClientHello с этим именем» (несколько SNI на одном
+/// адресе: блок имени против блока адреса). Данных не шлём.
+#[derive(Debug)]
+struct NoVerify;
+impl rustls::client::danger::ServerCertVerifier for NoVerify {
+    fn verify_server_cert(&self, _e: &rustls::pki_types::CertificateDer<'_>, _i: &[rustls::pki_types::CertificateDer<'_>], _n: &rustls::pki_types::ServerName<'_>,
+                          _o: &[u8], _t: rustls::pki_types::UnixTime) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(&self, _m: &[u8], _c: &rustls::pki_types::CertificateDer<'_>, _d: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(&self, _m: &[u8], _c: &rustls::pki_types::CertificateDer<'_>, _d: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()
+    }
+}
+
+fn tls_hello_only(ip: &str, sni: &str, to: Duration) -> Result<(), String> {
+    let ipa: IpAddr = ip.parse().map_err(|_| "плохой адрес".to_string())?;
+    let tcp = TcpStream::connect_timeout(&SocketAddr::new(ipa, 443), to).map_err(|e| e.to_string())?;
+    tcp.set_read_timeout(Some(to)).ok(); tcp.set_write_timeout(Some(to)).ok();
+    let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions().map_err(|e| e.to_string())?
+        .dangerous().with_custom_certificate_verifier(Arc::new(NoVerify)).with_no_client_auth();
+    let sn = rustls::pki_types::ServerName::try_from(sni.to_string()).map_err(|e| e.to_string())?;
+    let conn = rustls::ClientConnection::new(Arc::new(cfg), sn).map_err(|e| e.to_string())?;
+    let mut s = rustls::StreamOwned::new(conn, tcp);
+    while s.conn.is_handshaking() { s.conn.complete_io(&mut s.sock).map_err(|e| e.to_string())?; }
+    Ok(())
+}
+
+/// 01.10: сертификат по подменённому адресу - настоящий ли (подмена DNS против переезда адреса)
+fn cert_ok_at(ip: &str, host: &str, to: Duration) -> bool {
+    let ipa: IpAddr = match ip.parse() { Ok(a) => a, Err(_) => return false };
+    let Ok(tcp) = TcpStream::connect_timeout(&SocketAddr::new(ipa, 443), to) else { return false };
+    tcp.set_read_timeout(Some(to)).ok(); tcp.set_write_timeout(Some(to)).ok();
+    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let cfg = match rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider())).with_safe_default_protocol_versions() {
+        Ok(b) => b.with_root_certificates(roots).with_no_client_auth(), Err(_) => return false };
+    let Ok(sn) = rustls::pki_types::ServerName::try_from(host.to_string()) else { return false };
+    let Ok(conn) = rustls::ClientConnection::new(Arc::new(cfg), sn) else { return false };
+    let mut s = rustls::StreamOwned::new(conn, tcp);
+    while s.conn.is_handshaking() { if s.conn.complete_io(&mut s.sock).is_err() { return false; } }
+    true
 }
 
 /// 30.09: после сбоя подключения - воронка (force), если в плане сервера она есть; не чаще раза в 15 мин.
@@ -120,7 +271,7 @@ pub async fn after_failure(dir: std::path::PathBuf) {
         Ok(r) if r.status().is_success() => r.json().await.unwrap_or(Value::Null),
         _ => return,
     };
-    if plan["funnel"].is_object() { funnel(&client, &plan["funnel"], &token, &dir, true).await; }
+    if plan["funnel"].is_object() { funnel(&client, &plan["funnel"], &token, &dir, true, &plan["levels"]["funnel_extra"]).await; }
 }
 
 async fn post_measure(client: &reqwest::Client, token: &str, kind: &str, data: Value) {
@@ -217,7 +368,7 @@ fn funnel_srv(name: &str, ip: &str, sni: &str, big: &str, steps: &mut Vec<Value>
 
 /// probe_funnel (30.09): МИМО туннеля (как без VPN) - DNS системный и DoH (подмена = не тот адрес), сайт, подписка, TCP до
 /// серверов, TLS, > 16 КБ, «белые списки». Раз в every_h; force - после сбоя подключения.
-pub async fn funnel(client: &reqwest::Client, f: &Value, token: &str, dir: &std::path::Path, force: bool) {
+pub async fn funnel(client: &reqwest::Client, f: &Value, token: &str, dir: &std::path::Path, force: bool, extra: &Value) {
     if !force && !stamp_due(dir, "funnel_last", f["every_h"].as_u64().unwrap_or(6).clamp(1, 48) * 3600_000) { return; }
     let mut steps: Vec<Value> = Vec::new();
     let names = f["names"].as_object().cloned().unwrap_or_default();
@@ -229,12 +380,18 @@ pub async fn funnel(client: &reqwest::Client, f: &Value, token: &str, dir: &std:
             use std::net::ToSocketAddrs;
             hh.to_socket_addrs().map(|it| it.map(|x| x.ip().to_string()).collect::<Vec<String>>()).map_err(|e| e.to_string())
         }).await.unwrap_or_else(|e| Err(e.to_string()));
-        let r = match res {
+        let cert_check = extra["cert_check"].as_bool().unwrap_or(false);
+        let (r, other) = match res {
             Ok(a) => {
-                        if a.contains(&want) { Ok(()) } else { Err(format!("подмена: {}", a.join(",").chars().take(60).collect::<String>())) } }
-            Err(e) => Err(e),
+                if a.contains(&want) { (Ok(()), None) } else { (Err(format!("подмена: {}", a.join(",").chars().take(60).collect::<String>())), a.first().cloned()) } }
+            Err(e) => (Err(e), None),
         };
         step(&mut steps, &format!("dns:{h}"), t0, r);
+        if let (true, Some(ip)) = (cert_check, other) {
+            let (hh, ipc) = (h.clone(), ip.clone());
+            let ok = tauri::async_runtime::spawn_blocking(move || cert_ok_at(&ipc, &hh, Duration::from_secs(5))).await.unwrap_or(false);
+            steps.push(json!({"step": format!("cert:{h}"), "ok": ok, "ms": 0, "why": if ok { "адрес другой, сертификат наш" } else { "сертификат не наш" }}));
+        }
     }
     let want0 = names.get("vpn.insellers.su").and_then(|v| v.as_str()).unwrap_or("176.124.198.72").to_string();
     for u in f["doh"].as_array().cloned().unwrap_or_default() {
@@ -264,7 +421,40 @@ pub async fn funnel(client: &reqwest::Client, f: &Value, token: &str, dir: &std:
         st
     }).await.unwrap_or_default();
     steps.extend(more);
-    if f["whitelist"].is_object() {
+    if extra.is_object() {
+        // 01.10: несколько имён на одном адресе, контрольные адреса другого AS, наборы allow / non-allow
+        let snis: Vec<String> = extra["sni"].as_array().cloned().unwrap_or_default().iter().filter_map(|x| x.as_str().map(String::from)).collect();
+        let first = f["servers"].as_array().and_then(|a| a.first()).cloned().unwrap_or(Value::Null);
+        if first.is_object() && !snis.is_empty() {
+            let (ip, srvn) = (first["ip"].as_str().unwrap_or("").to_string(), first["server"].as_str().unwrap_or("?").to_string());
+            let more2: Vec<Value> = tauri::async_runtime::spawn_blocking(move || {
+                let mut st = Vec::new();
+                for sni in snis {
+                    let t0 = Instant::now();
+                    let r = tls_hello_only(&ip, &sni, Duration::from_secs(5));
+                    step(&mut st, &format!("tls2:{sni}@{srvn}"), t0, r);
+                }
+                st
+            }).await.unwrap_or_default();
+            steps.extend(more2);
+        }
+        let mut ctl_ok = false; let mut ctl_n = 0;
+        for u in extra["control"].as_array().cloned().unwrap_or_default() {
+            ctl_n += 1;
+            if matches!(code(client, u.as_str().unwrap_or("")).await, Ok(c) if (200..400).contains(&c)) { ctl_ok = true; }
+        }
+        if ctl_n > 0 { steps.push(json!({"step": "control", "ok": ctl_ok, "ms": 0, "why": if ctl_ok { "" } else { "контрольные адреса другого AS не открылись" }})); }
+        let (mut allow_n, mut non_n, mut allow_t, mut non_t) = (0, 0, 0, 0);
+        for u in extra["allow"].as_array().cloned().unwrap_or_default() { allow_t += 1; if matches!(code(client, u.as_str().unwrap_or("")).await, Ok(c) if (200..400).contains(&c)) { allow_n += 1; } }
+        for u in extra["non_allow"].as_array().cloned().unwrap_or_default() { non_t += 1; if matches!(code(client, u.as_str().unwrap_or("")).await, Ok(c) if (200..400).contains(&c)) { non_n += 1; } }
+        if allow_t > 0 && non_t > 0 {
+            steps.push(json!({"step": "wl:allowed", "ok": allow_n > 0, "ms": 0, "why": format!("{allow_n} из {allow_t}")}));
+            steps.push(json!({"step": "wl:normal", "ok": non_n > 0, "ms": 0, "why": format!("{non_n} из {non_t}")}));
+            steps.push(json!({"step": "whitelist", "ok": non_n > 0 || allow_n == 0,
+                              "why": if non_n == 0 && allow_n > 0 { "похоже на белые списки: разрешённые сайты открыты, обычные - нет" } else { "" }}));
+        }
+    }
+    if f["whitelist"].is_object() && !extra["allow"].is_array() {
         let t0 = Instant::now();
         let n = code(client, f["whitelist"]["normal"].as_str().unwrap_or("")).await;
         let normal = matches!(n, Ok(c) if (200..400).contains(&c));
