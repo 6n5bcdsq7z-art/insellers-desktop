@@ -831,14 +831,38 @@ fn update_page(app: &AppHandle, stage: &str, msg: &str) {
     }
 }
 
-#[tauri::command]
-async fn check_update(app: AppHandle, manual: Option<bool>) -> Result<bool, String> {
+/// 30.09 (владелец: Mac - обновление висит на 0%): проверка обновления не дольше 12 с напрямую; не вышло и VPN включён - через
+/// туннель (вход проверки ядра probe-in: адрес нашего сервера обычные входы шлют напрямую). Одновременно - одна проверка по кнопке
+/// (страница повторяла её каждые 20 с, и они копились по 2 минуты каждая).
+static UPD_CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+struct CheckGuard;
+impl Drop for CheckGuard { fn drop(&mut self) { UPD_CHECKING.store(false, std::sync::atomic::Ordering::SeqCst); } }
+
+async fn updater_check(app: &AppHandle, via_tunnel: bool) -> Result<Option<tauri_plugin_updater::Update>, String> {
     // 29.09: X-App-Token - бэкенд отдаёт владельцу кандидата (Mac в режиме TUN ходит с адреса нашего сервера - по адресу не узнать)
     let tok = load_token();
-    let updater = if tok.is_empty() { app.updater().map_err(|e| e.to_string())? } else {
-        app.updater_builder().header("X-App-Token", tok).map_err(|e| e.to_string())?.build().map_err(|e| e.to_string())?
+    let mut b = app.updater_builder().timeout(Duration::from_secs(if via_tunnel { 25 } else { 12 }));
+    if !tok.is_empty() { b = b.header("X-App-Token", tok).map_err(|e| e.to_string())?; }
+    if via_tunnel {
+        if let Ok(u) = url::Url::parse(&format!("http://127.0.0.1:{}", vpn::PROBE_PORT)) { b = b.proxy(u); }
+    }
+    b.build().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn check_update(app: AppHandle, manual: Option<bool>) -> Result<bool, String> {
+    if manual.unwrap_or(false) {
+        if UPD_CHECKING.swap(true, std::sync::atomic::Ordering::SeqCst) { return Ok(true); }   // проверка по кнопке уже идёт
+    }
+    let _cg = if manual.unwrap_or(false) { Some(CheckGuard) } else { None };
+    let res = match updater_check(&app, false).await {
+        Err(e) if vpn_running(&app) => {
+            remote_log("update.check_tunnel", serde_json::json!({"err": e}));
+            updater_check(&app, true).await.map_err(|e2| format!("{e}; через туннель: {e2}"))
+        }
+        r => r,
     };
-    match updater.check().await {
+    match res {
         Ok(Some(update)) => {
             if manual.unwrap_or(false) {
                 // по кнопке: качаем (VPN работает — раньше гасили его ДО загрузки, и сеть пропадала, а экран
@@ -907,9 +931,9 @@ async fn check_update(app: AppHandle, manual: Option<bool>) -> Result<bool, Stri
         Err(e) => {
             if manual.unwrap_or(false) {
                 update_page(&app, "error", "check");
-                remote_log("update.fail", serde_json::json!({"err": e.to_string(), "stage": "check"}));
+                remote_log("update.fail", serde_json::json!({"err": e, "stage": "check"}));
             }
-            Err(e.to_string())
+            Err(e)
         }
     }
 }
