@@ -177,7 +177,7 @@ static WD_FAILS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::ne
 static ALIVE_VIA: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);    // 1 - IPC Tauri, 2 - переход /__native/
 const WD_SILENT_MS: u64 = 15_000;
 
-/// 30.09 (владелец, Алеся на SOVAM): страница не пришла напрямую за 6 с при включённом VPN - окно пересоздаётся с прокси
+/// 30.09 (владелец, Алеся на SOVAM): страница не пришла напрямую за 3 с при включённом VPN - окно пересоздаётся с прокси
 /// на локальный вход ядра page-in (страница идёт через туннель) до перезапуска приложения. У части операторов фильтр режет
 /// приветствие шифрования в 2 пакета (у WebKit и WebView2 - постквантовый ключ), а запросы самого приложения проходят.
 /// macOS - прокси окна только с macOS 14. Журнал desktop.page_fallback {why, mac}.
@@ -197,14 +197,14 @@ fn mac_major() -> u32 {
 
 fn page_proxy_ok() -> bool { !cfg!(target_os = "macos") || mac_major() >= 14 }
 
-/// Навигация на нашу страницу началась: через 6 с нет ни загрузки, ни сигнала «жива» - запасной путь через туннель.
+/// Навигация на нашу страницу началась: через 3 с нет ни загрузки, ни сигнала «жива» - запасной путь через туннель.
 fn arm_page_fallback(app: &AppHandle) {
     use std::sync::atomic::Ordering::Relaxed;
     if PAGE_PROXY.load(Relaxed) { return; }
     let started = now_ms();
     let a = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio_sleep(6).await;
+        tokio_sleep(3).await;                          // 30.09 (владелец): 3 с (было 6)
         if PAGE_PROXY.load(Relaxed) || PAGE_DONE_AT.load(Relaxed) >= started || LAST_ALIVE.load(Relaxed) >= started { return; }
         if !vpn_running(&a) { return; }
         if !page_proxy_ok() {
