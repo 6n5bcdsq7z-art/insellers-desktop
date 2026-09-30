@@ -163,6 +163,119 @@ pub fn remote_log(ev: &str, data: serde_json::Value) {
     });
 }
 
+/// 30.09 (владелец: окно на Mac ушло в чёрный экран - страница перезагрузилась в 10 с перезапуска сервера, получила 502 и
+/// осталась на странице ошибки без нашего кода). Сторож страницы: страница раз в 5 с шлёт «жива» (page_alive); окно на экране
+/// и в фокусе, а сигнала нет 15 с - перезагрузить; 3 раза подряд без толку - встроенный экран «Переподключаемся…» (заставка
+/// dist/index.html?reconnect=<причина>, повтор каждые 5 с по проверке сервера server_ok). Страница ошибки (5xx) - сразу туда же.
+/// Процесс WebKit упал - Tauri (с 2.11) перезагружает страницу сам; наш след - page_crashed (страница умерла без выгрузки).
+/// Каждый случай - в журнал: desktop.reload {why, n} / desktop.crash {why}.
+static LAST_ALIVE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LOAD_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SEEN_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);   // окно стало видимым / в фокусе / проснулись
+static WD_RELOAD_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WD_FAILS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static ALIVE_VIA: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);    // 1 - IPC Tauri, 2 - переход /__native/
+const WD_SILENT_MS: u64 = 15_000;
+
+fn app_url(app: &AppHandle) -> String { format!("https://{HOST}/?app=desktop&v={}", app.package_info().version) }
+
+/// Встроенная заставка в режиме «Переподключаемся…» (macOS/Linux - tauri://localhost, Windows - http://tauri.localhost).
+fn reconnect_url(why: &str) -> String {
+    let base = if cfg!(target_os = "windows") { "http://tauri.localhost/index.html" } else { "tauri://localhost/index.html" };
+    let why: String = why.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').take(24).collect();
+    format!("{base}?reconnect={why}")
+}
+
+fn show_reconnect(app: &AppHandle, why: &str) {
+    if let Some(w) = app.get_webview_window("main") {
+        if let Ok(u) = url::Url::parse(&reconnect_url(why)) { let _ = w.navigate(u); }
+    }
+}
+
+/// Сигнал «страница жива» (IPC или переход /__native/alive).
+fn mark_alive(via: u8) {
+    LAST_ALIVE.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+    WD_FAILS.store(0, std::sync::atomic::Ordering::Relaxed);
+    ALIVE_VIA.store(via, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Страница сообщила, что загрузилась страница ошибки (502 во время выкладки и т.п.) - сразу встроенный экран с повтором.
+fn on_page_failed(app: &AppHandle, why: &str) {
+    remote_log("desktop.reload", serde_json::json!({"why": why, "to": "screen"}));
+    show_reconnect(app, why);
+}
+
+/// Страница после загрузки увидела, что прошлая умерла без выгрузки (падение процесса WebKit или зависание).
+fn on_page_crashed(arg: &serde_json::Value) {
+    // своя перезагрузка сторожа только что - уже записана как desktop.reload
+    if now_ms().saturating_sub(WD_RELOAD_AT.load(std::sync::atomic::Ordering::Relaxed)) < 30_000 { return; }
+    remote_log("desktop.crash", serde_json::json!({"why": "no_unload", "ago_ms": arg["ago"].as_u64().unwrap_or(0), "nav": arg["nav"].as_str().unwrap_or("")}));
+}
+
+#[tauri::command]
+fn page_alive() { mark_alive(1); }
+
+#[tauri::command]
+fn page_failed(app: AppHandle, why: String) { on_page_failed(&app, &why); }
+
+#[tauri::command]
+fn page_crashed(ago: Option<u64>, nav: Option<String>) { on_page_crashed(&serde_json::json!({"ago": ago.unwrap_or(0), "nav": nav.unwrap_or_default()})); }
+
+/// Для заставки: сервер страницы отвечает по-настоящему (200 и «ok»), а не 502 - сначала напрямую, потом через системный прокси.
+#[tauri::command]
+async fn server_ok() -> bool {
+    for direct in [true, false] {
+        let b = reqwest::Client::builder().timeout(Duration::from_secs(5));
+        let b = if direct { b.no_proxy() } else { b };
+        let Ok(c) = b.build() else { continue };
+        if let Ok(r) = c.get(format!("{BASE}/health?wd={}", now_ms())).send().await {
+            if r.status().is_success() && r.text().await.map(|t| t.contains("ok")).unwrap_or(false) { return true; }
+        }
+    }
+    false
+}
+
+/// Раз в 5 с: окно на экране и в фокусе, открыта наша страница, сигнала «жива» нет 15 с - перезагрузить; 3 раза - экран.
+fn start_watchdog(h: AppHandle) {
+    use std::sync::atomic::Ordering::Relaxed;
+    tauri::async_runtime::spawn(async move {
+        let mut last_tick = now_ms();
+        let mut acts: Vec<u64> = Vec::new();             // предохранитель: не больше 6 срабатываний в час
+        loop {
+            tokio_sleep(5).await;
+            let now = now_ms();
+            // сон компьютера / долгая пауза: таймеры страницы тоже стояли - отсчёт заново
+            if now.saturating_sub(last_tick) > 20_000 { SEEN_AT.store(now, Relaxed); }
+            last_tick = now;
+            let Some(w) = h.get_webview_window("main") else { continue };
+            let shown = w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false) && w.is_focused().unwrap_or(false);
+            if !shown { continue; }
+            let on_page = w.url().map(|u| u.host_str() == Some(HOST)).unwrap_or(false);
+            if !on_page { continue; }                     // заставка / экран переподключения повторяют сами
+            let since = LAST_ALIVE.load(Relaxed).max(LOAD_AT.load(Relaxed)).max(SEEN_AT.load(Relaxed));
+            if now.saturating_sub(since) < WD_SILENT_MS { continue; }
+            acts.retain(|t| now.saturating_sub(*t) < 3_600_000);
+            if acts.len() >= 6 {
+                if acts.len() == 6 { remote_log("desktop.reload", serde_json::json!({"why": "wd_giveup", "n": 6})); acts.push(now); }
+                continue;
+            }
+            acts.push(now);
+            let n = WD_FAILS.fetch_add(1, Relaxed) + 1;
+            WD_RELOAD_AT.store(now, Relaxed);
+            LOAD_AT.store(now, Relaxed);
+            let silent = now.saturating_sub(LAST_ALIVE.load(Relaxed));
+            if n >= 3 {
+                WD_FAILS.store(0, Relaxed);
+                remote_log("desktop.reload", serde_json::json!({"why": "no_alive", "n": n, "to": "screen", "silent_ms": silent, "via": ALIVE_VIA.load(Relaxed)}));
+                show_reconnect(&h, "no_alive");
+            } else {
+                remote_log("desktop.reload", serde_json::json!({"why": "no_alive", "n": n, "to": "page", "silent_ms": silent, "via": ALIVE_VIA.load(Relaxed)}));
+                if let Ok(u) = url::Url::parse(&app_url(&h)) { let _ = w.navigate(u); }
+            }
+        }
+    });
+}
+
 /// 27.09 (tasks/0000c): срок доступа (мс) со страницы - трей показывает остаток, а не только скорость. 0 - неизвестно.
 static ACCESS_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -223,6 +336,43 @@ fn init_script(token: &str, version: &str) -> String {
     // 29.09: проверка ЧЕРЕЗ туннель из ядра - ответ событием window "ins:probe" {{ok, ms, how}} и в window.__INS_PROBE
     probe: function () {{ inv("probe"); }}
   }};
+  // 30.09 (владелец: чёрный экран на Mac): сторож. Сначала IPC Tauri, не вышло - переход /__native/ (перехватывает приложение).
+  var send = function (cmd, args) {{
+    try {{
+      var ti = window.__TAURI_INTERNALS__;
+      if (ti && ti.invoke) {{ ti.invoke(cmd, args || {{}}).catch(function () {{ inv(cmd, args); }}); return; }}
+    }} catch (e) {{}}
+    inv(cmd, args);
+  }};
+  // прошлая страница этой вкладки умерла без выгрузки (упал процесс WebKit / зависла) - след в журнал
+  try {{
+    var la = +sessionStorage.getItem("__ins_la") || 0, cl = +sessionStorage.getItem("__ins_cl") || 0;
+    sessionStorage.removeItem("__ins_la");
+    if (la && cl < la && Date.now() - la < 120000) {{
+      var nt = "";
+      try {{ nt = (performance.getEntriesByType("navigation")[0] || {{}}).type || ""; }} catch (e) {{}}
+      var ago = Date.now() - la;
+      setTimeout(function () {{ send("page_crashed", {{ ago: ago, nav: nt }}); }}, 1500);
+    }}
+  }} catch (e) {{}}
+  window.addEventListener("pagehide", function () {{ try {{ sessionStorage.setItem("__ins_cl", String(Date.now())); }} catch (e) {{}} }});
+  // «жива» раз в 5 с - только наша страница (журнал и полоса баннера на месте), а не страница ошибки
+  var ours = function () {{ return typeof window.INS_LOG === "function" || !!document.getElementById("ad-bar"); }};
+  var alive = function () {{
+    if (document.visibilityState !== "visible" || !ours()) return;
+    try {{ sessionStorage.setItem("__ins_la", String(Date.now())); }} catch (e) {{}}
+    send("page_alive");
+  }};
+  setInterval(alive, 5000);
+  // страница ошибки вместо приложения (502/503/504 во время выкладки) - сразу встроенный экран с повтором
+  var errCheck = function () {{
+    if (ours()) return;
+    var t = (document.title || "") + " " + ((document.body && document.body.innerText) || "").slice(0, 300);
+    var m = t.match(/\b(50[0-9]|52[0-9])\b[^\n]{{0,40}}(Gateway|Error|Unavailable|Time-?out|timed out)/i) || t.match(/(Bad Gateway|Service Unavailable|Gateway Time-?out)/i);
+    if (m) send("page_failed", {{ why: "http_" + (m[1] && /^\d+$/.test(m[1]) ? m[1] : "5xx") }});
+  }};
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", function () {{ setTimeout(errCheck, 300); alive(); }});
+  else {{ setTimeout(errCheck, 300); alive(); }}
   // 29.09 (владелец): во внешний браузер - только переходы по нажатию человека (ссылка, window.open из клика). iframe и
   // фоновые запросы рекламных SDK (GigaPub pxl.iframe, VAST OnClickA, RichAds) остаются внутри окна.
   var ext = function (u) {{
@@ -297,6 +447,7 @@ fn build_main(app: &AppHandle) -> tauri::Result<()> {
                 }
                 return;
             }
+            if p.event() == tauri::webview::PageLoadEvent::Started { LOAD_AT.store(now_ms(), std::sync::atomic::Ordering::Relaxed); }
             if p.event() == tauri::webview::PageLoadEvent::Finished && p.url().host_str() == Some(HOST) && vpn_running(w.app_handle()) {
                 let _ = w.eval("if(!window.__INS_VPN||window.__INS_VPN==='disconnected'){window.__INS_VPN='connected';if(!window.__INS_CONN_AT)window.__INS_CONN_AT=Date.now();window.dispatchEvent(new CustomEvent('ins:vpn',{detail:{state:'connected',msg:'',code:''}}))}");
             }
@@ -316,6 +467,17 @@ fn build_main(app: &AppHandle) -> tauri::Result<()> {
                 let cmd = u.path().trim_start_matches("/__native/").to_string();
                 let arg: serde_json::Value = u.query_pairs().find(|(k, _)| k == "a")
                     .and_then(|(_, v)| serde_json::from_str(&v).ok()).unwrap_or_default();
+                // 30.09: сторож страницы - без записи native.cmd (раз в 5 с)
+                match cmd.as_str() {
+                    "page_alive" => { mark_alive(2); return false; }
+                    "page_crashed" => { on_page_crashed(&arg); return false; }
+                    "page_failed" => {
+                        let (h, why) = (handle.clone(), arg["why"].as_str().unwrap_or("http").to_string());
+                        let _ = handle.run_on_main_thread(move || on_page_failed(&h, &why));
+                        return false;
+                    }
+                    _ => {}
+                }
                 let h = handle.clone();
                 tauri::async_runtime::spawn(async move { native_cmd(h, &cmd, arg).await; });
                 return false;
@@ -714,10 +876,13 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .manage(vpn::VpnState::default())
-        .invoke_handler(tauri::generate_handler![login, logout, set_token, open_external, check_update, vpn_connect, vpn_disconnect])
+        .invoke_handler(tauri::generate_handler![login, logout, set_token, open_external, check_update, vpn_connect, vpn_disconnect,
+                                                 page_alive, page_failed, page_crashed, server_ok])
         .on_window_event(|window, event| {
             // закрытие окна — сворачиваем в трей, VPN продолжает работать; выход — через меню значка
             if let tauri::WindowEvent::CloseRequested { api, .. } = event { let _ = window.hide(); api.prevent_close(); }
+            // 30.09: окно снова перед глазами - сторож отсчитывает 15 с заново (таймеры скрытой страницы спят)
+            if let tauri::WindowEvent::Focused(true) = event { SEEN_AT.store(now_ms(), std::sync::atomic::Ordering::Relaxed); }
         })
         .setup(|app| {
             remote_log("app.start", serde_json::json!({"hasToken": !load_token().is_empty()}));
@@ -729,6 +894,7 @@ fn main() {
                 app.deep_link().on_open_url(move |_ev| { show_main(&h); });
             }
             start_pulse(app.handle().clone());
+            start_watchdog(app.handle().clone());
             if let Err(e) = setup_tray(app) { remote_log("tray.error", serde_json::json!({"err": e.to_string()})); }
             apply_autostart(app.handle(), pref("autoconnect"));
             // VPN был включён до обновления — включаем снова, даже без автоподключения
