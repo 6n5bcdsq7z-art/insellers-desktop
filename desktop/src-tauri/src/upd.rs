@@ -27,8 +27,11 @@ fn client(via_tunnel: bool) -> Result<reqwest::Client, String> {
         .read_timeout(Duration::from_secs(20));
     // «через туннель» = вход проверки ядра (probe-in -> балансировщик): обычный http-вход отправляет адрес нашего сервера
     // (vpn.insellers.su = IP сервера) напрямую, мимо туннеля
+    // 01.10 (владелец: Mac не качал обновление 30.09-01.10): при AmneziaWG входа проверки Xray (PROBE_PORT) нет - все попытки «через
+    // туннель» мгновенно получали отказ и через 15 с «error sending request». При AWG - общий вход (как у замеров probe.rs speed).
+    let port = if crate::vpn::cur_path() == "awg" { crate::vpn::HTTP_PORT } else { crate::vpn::PROBE_PORT };
     let b = if via_tunnel {
-        b.proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{}", crate::vpn::PROBE_PORT)).map_err(|e| e.to_string())?)
+        b.proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).map_err(|e| e.to_string())?)
     } else { b.no_proxy() };
     b.build().map_err(|e| e.to_string())
 }
@@ -56,6 +59,8 @@ pub async fn fetch(url: &str, tunnel_ok: bool, mut progress: impl FnMut(u64)) ->
     // 30.09 (владелец: Mac «Обновить» - 0%, «ещё раз» - снова 0%): 30 с без единого байта - ошибка, а не 30 попыток по 30 с молча;
     // BusyGuard снимет BUSY, страница получит 'error', следующее нажатие начнёт новую загрузку
     let mut last_byte = Instant::now();
+    let mut tunnel_errs = 0u32;              // 01.10: туннель не отвечает 3 раза подряд - назад к прямой загрузке (и не пробуем туннель снова)
+    let mut tunnel_ok = tunnel_ok;
     for attempt in 0..30u32 {
         if last_byte.elapsed() >= Duration::from_secs(30) {
             return Err(format!("нет данных 30 с{}", if last_err.is_empty() { String::new() } else { format!(" ({last_err})") }));
@@ -68,11 +73,18 @@ pub async fn fetch(url: &str, tunnel_ok: bool, mut progress: impl FnMut(u64)) ->
             Ok(r) => r,
             Err(e) => {
                 last_err = e.to_string();
-                if !via_tunnel && tunnel_ok { via_tunnel = true; crate::remote_log("update.via_tunnel", serde_json::json!({"why": "connect", "have": buf.len()})); }
+                if via_tunnel {
+                    tunnel_errs += 1;
+                    if tunnel_errs >= 3 {
+                        via_tunnel = false; tunnel_ok = false;
+                        crate::remote_log("update.tunnel_fail", serde_json::json!({"err": last_err.chars().take(120).collect::<String>(), "have": buf.len(), "path": crate::vpn::cur_path()}));
+                    }
+                } else if tunnel_ok { via_tunnel = true; crate::remote_log("update.via_tunnel", serde_json::json!({"why": "connect", "have": buf.len()})); }
                 continue;
             }
         };
         let st = resp.status().as_u16();
+        if via_tunnel { tunnel_errs = 0; }
         if st == 200 && !buf.is_empty() { buf.clear(); }
         if st != 200 && st != 206 { last_err = format!("HTTP {st}"); continue; }
         if total.is_none() || st == 200 {
