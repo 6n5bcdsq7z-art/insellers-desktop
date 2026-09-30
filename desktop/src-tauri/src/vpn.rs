@@ -967,6 +967,12 @@ const AD_DIRECT: &[&str] = &[
     "mbidadm.com", "mbidtg.com", "cabnnr.com",
     // 30.09 15:10: AdsBitvex (ролики) - Cloudflare, только по имени
     "adsbitvex.com",
+    // 30.09 17:00: то, что было только в ad-extra.json (Adcash, HilltopAds), и новые хосты показа: Adsterra Native
+    // (profitableratecpmnetwork.com), ролик MyBid (xml.galaxypush.com, adskeeper.com - Cloudflare, по имени), Kadam (viipqnqi.com)
+    "adexchangerapid.com", "usrpubtrk.com", "quizzical-topic.com",
+    "profitableratecpmnetwork.com", "galaxypush.com", "adskeeper.com", "viipqnqi.com",
+    // 30.09 17:40: EVADAV Native - скрипт curoax.com, реклама blolma.com
+    "curoax.com", "blolma.com",
     "sad.adsgram.ai", "api.adsgram.ai", "tma.adsgram.ai", "image.adsgram.ai", "images.adsgram.ai", "adsgram.me",
     "libtl.com", "onclckvd.com", "onclckstr.com", "onclckmetrics.com", "richinfo.co", "adx1.com", "4armn.com",
     "convers.link", "7ool.net", "adp3.net", "munqu.com", "cdn.giga.pub", "mndx1.com", "mvdomnd.com", "pebblepilot.com",
@@ -991,13 +997,24 @@ fn router_config(dir: &PathBuf) -> Value {
     if geo {
         for g in ["geosite:category-ru", "geosite:category-gov-ru", "geosite:category-bank-ru", "geosite:category-ecommerce-ru"] { ru.push(g.into()); }
     }
-    let ads: Vec<String> = AD_DIRECT.iter().map(|d| format!("domain:{d}")).collect();
+    // 30.09 17:40 (владелец: «реклама нигде не через туннель»): к вшитому AD_DIRECT - список сервера (ad-hosts.json, /api/app/ad-hosts):
+    // новые хосты показа без сборки; tunnel - хосты рекламы на Hetzner (напрямую из РФ не открываются) - выше «напрямую»
+    let srv: Value = std::fs::read(dir.join("ad-hosts.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+    let names = |k: &str| -> Vec<String> { srv[k].as_array().map(|a| a.iter().filter_map(|x| x.as_str())
+        .filter(|d| !d.is_empty() && d.len() < 100 && d.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+        .map(|d| d.to_string()).collect()).unwrap_or_default() };
+    let mut ads: Vec<String> = AD_DIRECT.iter().map(|d| format!("domain:{d}")).collect();
+    for d in names("direct") { let x = format!("domain:{d}"); if !ads.contains(&x) { ads.push(x); } }
+    let tun: Vec<String> = names("tunnel").iter().map(|d| format!("domain:{d}")).collect();
     let mut rules = vec![
         json!({"type": "field", "ip": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16"], "outboundTag": "direct"}),
         json!({"type": "field", "domain": ["domain:insellers.su"], "outboundTag": "awg"}),
+    ];
+    if !tun.is_empty() { rules.push(json!({"type": "field", "domain": tun, "outboundTag": "awg"})); }
+    rules.extend([
         json!({"type": "field", "domain": ads, "outboundTag": "direct"}),
         json!({"type": "field", "domain": ru, "outboundTag": "direct"}),
-    ];
+    ]);
     if geo { rules.push(json!({"type": "field", "ip": ["geoip:ru"], "outboundTag": "direct"})); }
     let sniff = json!({"enabled": true, "destOverride": ["http", "tls"], "routeOnly": true});
     json!({
@@ -1014,6 +1031,18 @@ fn router_config(dir: &PathBuf) -> Value {
         ],
         "routing": {"domainStrategy": "AsIs", "rules": rules}
     })
+}
+
+/// 30.09 17:40: список рекламы с сервера в ad-hosts.json (не пришёл за 4 с - остаётся прошлый / только вшитый AD_DIRECT).
+async fn fetch_ad_hosts(client: &reqwest::Client, dir: &PathBuf) {
+    let r = client.get(format!("{}/api/app/ad-hosts", crate::BASE)).timeout(Duration::from_secs(4)).send().await;
+    if let Ok(r) = r {
+        if r.status().is_success() {
+            if let Ok(v) = r.json::<Value>().await {
+                if v["direct"].is_array() { let _ = std::fs::write(dir.join("ad-hosts.json"), serde_json::to_vec(&v).unwrap_or_default()); }
+            }
+        }
+    }
 }
 
 /// Запустить маршрутизатор (свой слот, не трогает основной процесс wireproxy).
@@ -1298,6 +1327,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         let mut routed = false;
         if AWG_ROUTER && inner.exists() {
             let _ = ensure_geo(&app, &dir).await;      // geosite/geoip для российского мимо туннеля (без них - только по зонам)
+            fetch_ad_hosts(&client, &dir).await;       // 30.09: хосты показа рекламы - напрямую / Hetzner - туннель (список сервера)
             launch(&app, "wireproxy", vec!["-c".into(), inner.to_string_lossy().to_string()], &dir)?;
             match launch_router(&app, &dir) {
                 Ok(()) => routed = true,
