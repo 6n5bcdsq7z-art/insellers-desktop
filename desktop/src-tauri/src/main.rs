@@ -472,7 +472,9 @@ fn init_script(token: &str, version: &str) -> String {
     getVpnState: function () {{ return window.__INS_VPN || "disconnected"; }},
     setAccessUntil: function (ms) {{ inv("set_access", {{ ms: String(ms) }}); }},
     // 29.09: проверка ЧЕРЕЗ туннель из ядра - ответ событием window "ins:probe" {{ok, ms, how}} и в window.__INS_PROBE
-    probe: function () {{ inv("probe"); }}
+    probe: function () {{ inv("probe"); }},
+    // 01.10: «Не работает?» - воронка мимо туннеля, ответ событием window "ins:funnel"
+    probeFunnel: function () {{ inv("probe_funnel"); }}
   }};
   // 30.09 (владелец: чёрный экран на Mac): сторож. Сначала IPC Tauri, не вышло - переход /__native/ (перехватывает приложение).
   var send = function (cmd, args) {{
@@ -807,6 +809,12 @@ async fn native_cmd(app: AppHandle, cmd: &str, arg: serde_json::Value) {
             if let Some(w) = app.get_webview_window("main") {
                 let d = serde_json::json!({"ok": ok, "ms": ms, "how": how}).to_string();
                 let _ = w.eval(&format!("window.__INS_PROBE={d};window.dispatchEvent(new CustomEvent('ins:probe',{{detail:{d}}}))"));
+            }
+        }
+        "probe_funnel" => {
+            let d = crate::probe::funnel_now().await.to_string();
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.eval(&format!("window.dispatchEvent(new CustomEvent('ins:funnel',{{detail:{d}}}))"));
             }
         }
         "set_access" => ACCESS_UNTIL.store(arg["ms"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0), std::sync::atomic::Ordering::Relaxed),

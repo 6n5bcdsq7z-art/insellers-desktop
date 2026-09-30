@@ -593,3 +593,126 @@ pub async fn run_variants(app: &tauri::AppHandle, dir: &std::path::Path, token: 
         .json(&body).send().await { Ok(r) => r.status().as_u16().to_string(), Err(e) => e.to_string().chars().take(100).collect() };
     crate::remote_log("probe.variants", json!({"ok": st == "200", "n": n, "passed": passed, "post": st}));
 }
+
+// ---- «Не работает?» (01.10, владелец): воронка мимо туннеля по нажатию - InsellersNative.probeFunnel() -> событие ins:funnel ----
+// <= 6 с, ~30 КБ, без скачивания: матрица путей (TCP + рукопожатие TLS с прикрытием Reality/XHTTP до NL-1 и NL-2), «портал» Wi-Fi
+// (generate_204 напрямую), сдвиг часов по NTP, раздача (Mac: шлюз 172.20.10.1 - точка доступа iPhone), энергосбережение, текущий путь.
+// Hysteria/AmneziaWG (UDP) без своего протокола не проверяются. failure_class - таксономия backend/failure_class.py.
+
+fn fclass(stage: &str, e: &str) -> &'static str {
+    let l = e.to_lowercase();
+    if l.contains("unreachable") || l.contains("no route") { return "CLIENT_NETWORK_BAD"; }
+    if stage == "tcp" {
+        if l.contains("refused") || l.contains("reset") { return "TCP_RST"; }
+        return "TCP_CONNECT_TIMEOUT";
+    }
+    if l.contains("timed out") || l.contains("timeout") || l.contains("would block") { return "TLS_CLIENT_HELLO_TIMEOUT"; }
+    if l.contains("reset") || l.contains("eof") || l.contains("closed") || l.contains("broken pipe") { return "TLS_RST"; }
+    if l.contains("alert") { return "TLS_ALERT"; }
+    "UNKNOWN"
+}
+
+fn tls_path(proto: &str, sni: &str, srv: &str, ip: &str, to: Duration) -> Value {
+    let t0 = Instant::now();
+    let mut o = json!({"proto": proto, "server": srv});
+    let ipa: IpAddr = match ip.parse() { Ok(a) => a, Err(_) => return o };
+    let tcp = match TcpStream::connect_timeout(&SocketAddr::new(ipa, 443), to) {
+        Ok(t) => t,
+        Err(e) => { let s = e.to_string(); o["tcp_ok"] = json!(false); o["hs_ok"] = json!(false); o["failure_class"] = json!(fclass("tcp", &s));
+                    o["error_code"] = json!(s.chars().take(100).collect::<String>()); o["elapsed_ms"] = json!(t0.elapsed().as_millis() as u64); return o; }
+    };
+    o["tcp_ok"] = json!(true); o["tcp_ms"] = json!(t0.elapsed().as_millis() as u64);
+    tcp.set_read_timeout(Some(to)).ok(); tcp.set_write_timeout(Some(to)).ok();
+    let t1 = Instant::now();
+    let r = (|| -> Result<(), String> {
+        let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions().map_err(|e| e.to_string())?
+            .dangerous().with_custom_certificate_verifier(Arc::new(NoVerify)).with_no_client_auth();
+        let sn = rustls::pki_types::ServerName::try_from(sni.to_string()).map_err(|e| e.to_string())?;
+        let conn = rustls::ClientConnection::new(Arc::new(cfg), sn).map_err(|e| e.to_string())?;
+        let mut s = rustls::StreamOwned::new(conn, tcp);
+        while s.conn.is_handshaking() { s.conn.complete_io(&mut s.sock).map_err(|e| e.to_string())?; }
+        Ok(())
+    })();
+    match r {
+        Ok(()) => { o["hs_ok"] = json!(true); o["hs_ms"] = json!(t1.elapsed().as_millis() as u64); o["failure_class"] = json!("NONE"); }
+        Err(e) => { o["hs_ok"] = json!(false); o["failure_class"] = json!(fclass("tls", &e)); o["error_code"] = json!(e.chars().take(100).collect::<String>()); }
+    }
+    o["elapsed_ms"] = json!(t0.elapsed().as_millis() as u64);
+    o
+}
+
+fn ntp_skew() -> Value {
+    use std::net::{ToSocketAddrs, UdpSocket};
+    let t0 = Instant::now();
+    let r = (|| -> Result<f64, String> {
+        let addr = "time.google.com:123".to_socket_addrs().map_err(|e| e.to_string())?.find(|a| a.is_ipv4()).ok_or("нет адреса")?;
+        let s = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+        s.set_read_timeout(Some(Duration::from_secs(2))).ok();
+        let mut req = [0u8; 48]; req[0] = 0x1B;
+        let sent = crate::now_ms() as f64;
+        s.send_to(&req, addr).map_err(|e| e.to_string())?;
+        let mut b = [0u8; 48];
+        s.recv_from(&mut b).map_err(|e| e.to_string())?;
+        let recv = crate::now_ms() as f64;
+        let secs = u32::from_be_bytes([b[40], b[41], b[42], b[43]]) as f64;
+        let frac = u32::from_be_bytes([b[44], b[45], b[46], b[47]]) as f64;
+        let server = (secs - 2208988800.0) * 1000.0 + frac * 1000.0 / 4294967296.0;
+        Ok(((sent + recv) / 2.0 - server) / 1000.0)
+    })();
+    match r {
+        Ok(sk) => json!({"ok": true, "skew_s": (sk * 10.0).round() / 10.0, "elapsed_ms": t0.elapsed().as_millis() as u64,
+                         "failure_class": if sk.abs() > 300.0 { "CLIENT_CLOCK_SKEW" } else { "NONE" }}),
+        Err(e) => json!({"ok": false, "failure_class": "UDP_TIMEOUT", "error_code": e.chars().take(80).collect::<String>(), "elapsed_ms": t0.elapsed().as_millis() as u64}),
+    }
+}
+
+fn gateway() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(o) = std::process::Command::new("route").args(["-n", "get", "default"]).output() {
+            let s = String::from_utf8_lossy(&o.stdout).to_string();
+            if let Some(l) = s.lines().find(|l| l.trim_start().starts_with("gateway:")) { return l.split(':').nth(1).unwrap_or("").trim().to_string(); }
+        }
+    }
+    String::new()
+}
+
+pub async fn funnel_now() -> Value {
+    let t0 = Instant::now();
+    let matrix: Vec<Value> = tauri::async_runtime::spawn_blocking(|| {
+        let mut hs = Vec::new();
+        for (srv, ip) in [("NL-1", "176.124.198.72"), ("NL-2", "212.34.151.212")] {
+            for (proto, sni) in [("reality", "www.samsung.com"), ("xhttp", "www.philips.com")] {
+                hs.push(std::thread::spawn(move || tls_path(proto, sni, srv, ip, Duration::from_secs(3))));
+            }
+        }
+        hs.into_iter().filter_map(|h| h.join().ok()).collect()
+    }).await.unwrap_or_default();
+    let ntp = tauri::async_runtime::spawn_blocking(ntp_skew).await.unwrap_or(Value::Null);
+    let cap = match reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_millis(2500)).build() {
+        Ok(c) => match c.get("http://connectivitycheck.gstatic.com/generate_204").send().await {
+            Ok(r) => { let code = r.status().as_u16(); json!({"ok": code == 204, "code": code, "portal": code != 204, "failure_class": if code == 204 { "NONE" } else { "CLIENT_NETWORK_BAD" }}) }
+            Err(e) => { let s = e.to_string(); json!({"ok": false, "failure_class": fclass("tcp", &s), "error_code": s.chars().take(100).collect::<String>()}) }
+        },
+        Err(_) => Value::Null,
+    };
+    let gw = gateway();
+    let mut steps = Vec::new();
+    for m in &matrix {
+        let (srv, proto) = (m["server"].as_str().unwrap_or(""), m["proto"].as_str().unwrap_or(""));
+        let tok = m["tcp_ok"].as_bool().unwrap_or(false);
+        steps.push(json!({"step": format!("ip:{srv}"), "ok": tok, "ms": m["tcp_ms"].clone(), "failure_class": if tok { "NONE" } else { m["failure_class"].as_str().unwrap_or("") },
+                          "why": if tok { "" } else { m["error_code"].as_str().unwrap_or("") }}));
+        if tok { steps.push(json!({"step": format!("tls2:{proto}@{srv}"), "ok": m["hs_ok"].clone(), "ms": m["hs_ms"].clone(), "failure_class": m["failure_class"].clone(), "why": m["error_code"].clone()})); }
+    }
+    if cap.is_object() { steps.push(json!({"step": "control", "ok": cap["ok"].as_bool().unwrap_or(false) || cap["code"].as_u64().map(|c| (200..400).contains(&c)).unwrap_or(false),
+                                           "why": if cap["portal"].as_bool().unwrap_or(false) { format!("портал Wi-Fi (ответ {})", cap["code"]) } else { cap["error_code"].as_str().unwrap_or("").to_string() }})); }
+    if ntp["ok"].as_bool().unwrap_or(false) { steps.push(json!({"step": "clock", "ok": ntp["skew_s"].as_f64().unwrap_or(0.0).abs() < 300.0, "skew_s": ntp["skew_s"].clone()})); }
+    json!({"v": 1, "src": "desktop", "matrix": matrix, "captive": cap, "ntp": ntp, "steps": steps,
+           "gateway": if gw.is_empty() { Value::Null } else { json!(gw) }, "hotspot": gw == "172.20.10.1",
+           "power_save": low_power(), "other_vpn": Value::Null, "net_changes_10m": Value::Null,
+           "vpn": {"path": crate::vpn::cur_path()},
+           "udp": {"note": "Hysteria/AmneziaWG без своего протокола не проверяются - только текущее подключение"},
+           "ms": t0.elapsed().as_millis() as u64})
+}
