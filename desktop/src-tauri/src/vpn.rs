@@ -205,6 +205,9 @@ pub const HTTP_PORT: u16 = 38809;
 /// 26.09: вход только для проверки пути реальной загрузкой (правило маршрута ведёт его строго в путь, см. add_probe_rule)
 pub const PROBE_PORT: u16 = 38810;
 const API_PORT: u16 = 38813;
+/// 30.09 (владелец, SOVAM): вход для страницы приложения - запасной путь окна, если напрямую страница не открылась (фильтр режет
+/// приветствие шифрования WebKit/WebView2 в 2 пакета). Маршрут - как у проверки (в туннель); у AmneziaWG - insellers.su -> awg.
+pub const PAGE_PORT: u16 = 38815;
 /// 27.09 (п.5): счётчики трафика ядра по выходам (xray metrics, /debug/vars) - мгновенное обнаружение заморозки
 const METRICS_PORT: u16 = 38814;
 const PROBE_URL: &str = "https://vpn.insellers.su/probe/";
@@ -540,9 +543,10 @@ fn add_probe_rule(cfg: &mut Value) {
     let bal = cfg.pointer("/routing/balancers/0/tag").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let main = if bal.is_empty() { path_tag(cfg) } else { String::new() };
     if bal.is_empty() && main.is_empty() { return; }
-    if cfg["routing"]["rules"].as_array().map(|a| a.iter().any(|r| r["inboundTag"] == json!(["probe-in"]))).unwrap_or(false) { return; }
-    let rule = if !bal.is_empty() { json!({"type": "field", "inboundTag": ["probe-in"], "balancerTag": bal}) }
-               else { json!({"type": "field", "inboundTag": ["probe-in"], "outboundTag": main}) };
+    if cfg["routing"]["rules"].as_array().map(|a| a.iter().any(|r| r["inboundTag"] == json!(["probe-in"]) || r["inboundTag"] == json!(["probe-in", "page-in"]))).unwrap_or(false) { return; }
+    // 30.09: page-in (запасной путь страницы окна) - тем же путём, что проверка
+    let rule = if !bal.is_empty() { json!({"type": "field", "inboundTag": ["probe-in", "page-in"], "balancerTag": bal}) }
+               else { json!({"type": "field", "inboundTag": ["probe-in", "page-in"], "outboundTag": main}) };
     if !cfg["routing"].is_object() { cfg["routing"] = json!({}); }
     cfg["api"] = json!({"tag": "api", "services": ["RoutingService"]});   // этап 7: xray api bo
     // 27.09 (п.5): счётчики по выходам для быстрого сторожа заморозки (только 127.0.0.1)
@@ -996,7 +1000,8 @@ fn router_config(dir: &PathBuf) -> Value {
         "log": {"loglevel": "warning"},
         "inbounds": [
             {"tag": "socks", "listen": "127.0.0.1", "port": SOCKS_PORT, "protocol": "socks", "settings": {"udp": true}, "sniffing": sniff},
-            {"tag": "http", "listen": "127.0.0.1", "port": HTTP_PORT, "protocol": "http", "sniffing": sniff}
+            {"tag": "http", "listen": "127.0.0.1", "port": HTTP_PORT, "protocol": "http", "sniffing": sniff},
+            {"tag": "page-in", "listen": "127.0.0.1", "port": PAGE_PORT, "protocol": "http", "sniffing": sniff}
         ],
         "outbounds": [
             {"tag": "awg", "protocol": "socks", "settings": {"servers": [{"address": "127.0.0.1", "port": AWG_INNER_PORT}]}},
@@ -1125,6 +1130,7 @@ fn local_inbounds() -> Value {
         {"tag": "http-in", "listen": "127.0.0.1", "port": HTTP_PORT, "protocol": "http",
          "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}},
         {"tag": "probe-in", "listen": "127.0.0.1", "port": PROBE_PORT, "protocol": "http"},
+        {"tag": "page-in", "listen": "127.0.0.1", "port": PAGE_PORT, "protocol": "http"},
         // этап 7 (26.09 ночь): API ядра только с этого компьютера - переключение пути без перезапуска (xray api bo)
         {"tag": "api-in", "listen": "127.0.0.1", "port": API_PORT, "protocol": "dokodemo-door", "settings": {"address": "127.0.0.1"}}
     ])
