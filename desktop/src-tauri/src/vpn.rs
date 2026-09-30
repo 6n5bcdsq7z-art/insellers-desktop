@@ -516,7 +516,7 @@ fn is_bad(tag: &str) -> bool {
     BAD_PATHS.lock().unwrap().iter().any(|(t, ts)| t == tag && now.saturating_sub(*ts) < 30 * 60 * 1000)
 }
 fn set_cur_path(tag: &str) { *CUR_PATH.lock().unwrap() = tag.to_string(); }
-fn cur_path() -> String { CUR_PATH.lock().unwrap().clone() }
+pub(crate) fn cur_path() -> String { CUR_PATH.lock().unwrap().clone() }
 static CUR_DESC: Mutex<String> = Mutex::new(String::new());
 /// этап 7: выход, на который переключили балансировщик через API (общий для медленной проверки и быстрого сторожа)
 static HOT_CUR: Mutex<String> = Mutex::new(String::new());
@@ -1189,6 +1189,12 @@ fn set_proxy(enable: bool) {
 pub fn notify(app: &AppHandle, state: &str, msg: &str) { notify_code(app, state, msg, ""); }
 
 pub fn notify_code(app: &AppHandle, state: &str, msg: &str, code: &str) {
+    // 30.09: сбой подключения - воронка связи мимо туннеля (если сервер её включил этому человеку), не чаще раза в 15 мин
+    if state == "error" && code != "guest_expired" {
+        if let Ok(d) = data_dir(app) {
+            tauri::async_runtime::spawn(async move { crate::probe::after_failure(d).await; });
+        }
+    }
     if let Some(w) = app.get_webview_window("main") {
         let js = format!(
             "window.__INS_VPN={s};if({s}==='connected'&&!window.__INS_CONN_AT)window.__INS_CONN_AT=Date.now();if({s}==='disconnected')window.__INS_CONN_AT=0;window.dispatchEvent(new CustomEvent('ins:vpn',{{detail:{{state:{s},msg:{m},code:{c}}}}}))",
@@ -1532,7 +1538,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
             if cur_gen(&pr) != watch_gen || !wanted(&pr) { break; }
             if let Ok(d) = data_dir(&pr) {
                 if crate::probe::due(&d) {
-                    crate::probe::run_once(crate::load_token()).await;
+                    crate::probe::run_once(crate::load_token(), d.clone()).await;
                 }
                 // 26.09 ночь: замер вариантов конфигурации для диагностической машины (раз в час, ~0.5 МБ)
                 if crate::probe::variants_due(&d) {

@@ -75,7 +75,7 @@ fn low_power() -> bool {
 }
 
 /// Один раунд: план с сервера → замеры в отдельных потоках → отчёт.
-pub async fn run_once(token: String) {
+pub async fn run_once(token: String, dir: std::path::PathBuf) {
     if token.is_empty() || low_power() { return; }
     // мимо системного прокси (он же туннель): иначе сервер видит IP нашего сервера, а не провайдера человека
     let client = match reqwest::Client::builder().no_proxy().user_agent(format!("InsellersVPN/desktop-{}", env!("CARGO_PKG_VERSION")))
@@ -103,6 +103,180 @@ pub async fn run_once(token: String) {
                       "version": env!("CARGO_PKG_VERSION"), "results": results});
     let _ = client.post(format!("{}/api/app/probe", crate::BASE)).header("X-App-Token", &token)
         .timeout(Duration::from_secs(15)).json(&body).send().await;
+    // 30.09 (Мозг v2): скорость и воронка - только если сервер включил их этому человеку (план)
+    if plan["speed"].is_object() { speed(&client, &plan["speed"], &token, &dir).await; }
+    if plan["funnel"].is_object() { funnel(&client, &plan["funnel"], &token, &dir, false).await; }
+}
+
+/// 30.09: после сбоя подключения - воронка (force), если в плане сервера она есть; не чаще раза в 15 мин.
+pub async fn after_failure(dir: std::path::PathBuf) {
+    if !stamp_due(&dir, "funnel_fail", 15 * 60_000) { return; }
+    let token = crate::load_token();
+    if token.is_empty() { return; }
+    let client = match reqwest::Client::builder().no_proxy().user_agent(format!("InsellersVPN/desktop-{}", env!("CARGO_PKG_VERSION")))
+        .build() { Ok(c) => c, Err(_) => return };
+    let plan: Value = match client.get(format!("{}/api/app/probe-plan", crate::BASE)).header("X-App-Token", &token)
+        .timeout(Duration::from_secs(10)).send().await {
+        Ok(r) if r.status().is_success() => r.json().await.unwrap_or(Value::Null),
+        _ => return,
+    };
+    if plan["funnel"].is_object() { funnel(&client, &plan["funnel"], &token, &dir, true).await; }
+}
+
+async fn post_measure(client: &reqwest::Client, token: &str, kind: &str, data: Value) {
+    let body = json!({"kind": kind, "net": "", "device": format!("ins-{}", crate::install_id()), "platform": "desktop",
+                      "version": env!("CARGO_PKG_VERSION"), "path": crate::vpn::cur_path(), "data": data});
+    let _ = client.post(format!("{}/api/app/measure", crate::BASE)).header("X-App-Token", token)
+        .timeout(Duration::from_secs(15)).json(&body).send().await;
+}
+
+fn stamp_due(dir: &std::path::Path, name: &str, every_ms: u64) -> bool {
+    let p = dir.join(name);
+    let last = std::fs::read_to_string(&p).ok().and_then(|t| t.trim().parse::<u64>().ok()).unwrap_or(0);
+    let now = crate::now_ms();
+    if last != 0 && now >= last && now - last < every_ms { return false; }
+    let _ = std::fs::write(&p, now.to_string());
+    true
+}
+
+/// probe_speed (30.09): через ТЕКУЩИЙ путь туннеля (вход проверки ядра; при AmneziaWG - общий вход, vpn.insellers.su идёт в туннель):
+/// пинг 5 x /probe/204 по одному соединению, загрузка down_wifi (1 МБ), отдача POST up_kb. Раз в ~час, не в энергосбережении и не на батарее < 30%.
+async fn speed(direct: &reqwest::Client, s: &Value, token: &str, dir: &std::path::Path) {
+    if low_power() || battery_low() || !stamp_due(dir, "speed_last", 55 * 60_000) { return; }
+    let port = if crate::vpn::cur_path() == "awg" { crate::vpn::HTTP_PORT } else { crate::vpn::PROBE_PORT };
+    let secs = s["timeout_s"].as_u64().unwrap_or(40).clamp(10, 60);
+    let c = match reqwest::Proxy::all(format!("http://127.0.0.1:{port}"))
+        .and_then(|p| reqwest::Client::builder().proxy(p).pool_max_idle_per_host(1).timeout(Duration::from_secs(secs)).build()) { Ok(c) => c, Err(_) => return };
+    let mut pings = Vec::new();
+    let pu = s["ping_url"].as_str().unwrap_or("https://vpn.insellers.su/probe/204").to_string();
+    for i in 0..s["ping_n"].as_u64().unwrap_or(5).clamp(1, 10) {
+        let t0 = Instant::now();
+        if let Ok(r) = c.get(format!("{pu}?r={i}")).send().await {
+            if r.status().is_success() { let _ = r.bytes().await; pings.push(t0.elapsed().as_millis() as u64); }
+        }
+    }
+    let (mut db, mut dms, mut dok) = (0u64, 0u64, 0u64);
+    for (i, u) in s["down_wifi"].as_array().cloned().unwrap_or_default().iter().enumerate() {
+        let t0 = Instant::now();
+        if let Ok(mut r) = c.get(format!("{}?r={i}", u.as_str().unwrap_or(""))).send().await {
+            let ok = r.status().is_success();
+            while let Ok(Some(b)) = r.chunk().await { db += b.len() as u64; }
+            if ok { dok += 1; }
+        }
+        dms += t0.elapsed().as_millis() as u64;
+    }
+    let mut d = json!({"ping_ms": pings, "down_bytes": db, "down_ms": dms, "down_ok": dok});
+    if let Some(up) = s["up_url"].as_str().filter(|x| !x.is_empty()) {
+        let n = (s["up_kb"].as_u64().unwrap_or(128).clamp(16, 1024) * 1024) as usize;
+        let body: Vec<u8> = (0..n).map(|i| (i.wrapping_mul(2654435761) >> 7) as u8).collect();
+        let t0 = Instant::now();
+        let code = match c.post(up).header("Content-Type", "application/octet-stream").body(body).send().await { Ok(r) => r.status().as_u16(), Err(_) => 0 };
+        d["up_bytes"] = json!(if (200..300).contains(&code) { n } else { 0 });
+        d["up_ms"] = json!(t0.elapsed().as_millis() as u64);
+        d["up_code"] = json!(code);
+    }
+    post_measure(direct, token, "speed", d).await;
+}
+
+fn step(steps: &mut Vec<Value>, name: &str, t0: Instant, r: Result<(), String>) {
+    steps.push(json!({"step": name, "ok": r.is_ok(), "ms": t0.elapsed().as_millis() as u64, "why": r.err().unwrap_or_default()}));
+}
+
+/// Серверный шаг воронки (блокирующий): TCP -> TLS (SNI) -> GET big, «> 16 КБ».
+fn funnel_srv(name: &str, ip: &str, sni: &str, big: &str, steps: &mut Vec<Value>) {
+    let to = Duration::from_secs(5);
+    let t0 = Instant::now();
+    let ipa: IpAddr = match ip.parse() { Ok(a) => a, Err(_) => return };
+    let tcp = match TcpStream::connect_timeout(&SocketAddr::new(ipa, 443), to) {
+        Ok(t) => { step(steps, &format!("ip:{name}"), t0, Ok(())); t }
+        Err(e) => { step(steps, &format!("ip:{name}"), t0, Err(e.to_string())); return; }
+    };
+    tcp.set_read_timeout(Some(to)).ok(); tcp.set_write_timeout(Some(to)).ok();
+    let t1 = Instant::now();
+    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let cfg = match rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions() { Ok(b) => b.with_root_certificates(roots).with_no_client_auth(), Err(_) => return };
+    let Ok(sn) = rustls::pki_types::ServerName::try_from(sni.to_string()) else { return };
+    let Ok(conn) = rustls::ClientConnection::new(Arc::new(cfg), sn) else { return };
+    let mut s = rustls::StreamOwned::new(conn, tcp);
+    let mut hs: Result<(), String> = Ok(());
+    while s.conn.is_handshaking() {
+        if let Err(e) = s.conn.complete_io(&mut s.sock) { hs = Err(e.to_string()); break; }
+    }
+    let bad = hs.is_err();
+    step(steps, &format!("tls:{name}"), t1, hs);
+    if bad { return; }
+    let t2 = Instant::now();
+    let mut got = 0usize;
+    let mut buf = [0u8; 16384];
+    if s.write_all(format!("GET {big} HTTP/1.1\r\nHost: {sni}\r\nConnection: close\r\n\r\n").as_bytes()).is_ok() {
+        while got < 32 * 1024 { match s.read(&mut buf) { Ok(0) | Err(_) => break, Ok(n) => got += n } }
+    }
+    step(steps, &format!("16kb:{name}"), t2, if got >= 16 * 1024 + 200 { Ok(()) } else { Err(format!("дошло {} КБ", got / 1024)) });
+}
+
+/// probe_funnel (30.09): МИМО туннеля (как без VPN) - DNS системный и DoH (подмена = не тот адрес), сайт, подписка, TCP до
+/// серверов, TLS, > 16 КБ, «белые списки». Раз в every_h; force - после сбоя подключения.
+pub async fn funnel(client: &reqwest::Client, f: &Value, token: &str, dir: &std::path::Path, force: bool) {
+    if !force && !stamp_due(dir, "funnel_last", f["every_h"].as_u64().unwrap_or(6).clamp(1, 48) * 3600_000) { return; }
+    let mut steps: Vec<Value> = Vec::new();
+    let names = f["names"].as_object().cloned().unwrap_or_default();
+    for (h, want) in &names {
+        let t0 = Instant::now();
+        let want = want.as_str().unwrap_or("").to_string();
+        let hh = format!("{h}:443");
+        let res = tauri::async_runtime::spawn_blocking(move || {
+            use std::net::ToSocketAddrs;
+            hh.to_socket_addrs().map(|it| it.map(|x| x.ip().to_string()).collect::<Vec<String>>()).map_err(|e| e.to_string())
+        }).await.unwrap_or_else(|e| Err(e.to_string()));
+        let r = match res {
+            Ok(a) => {
+                        if a.contains(&want) { Ok(()) } else { Err(format!("подмена: {}", a.join(",").chars().take(60).collect::<String>())) } }
+            Err(e) => Err(e),
+        };
+        step(&mut steps, &format!("dns:{h}"), t0, r);
+    }
+    let want0 = names.get("vpn.insellers.su").and_then(|v| v.as_str()).unwrap_or("176.124.198.72").to_string();
+    for u in f["doh"].as_array().cloned().unwrap_or_default() {
+        let u = u.as_str().unwrap_or("").to_string();
+        let t0 = Instant::now();
+        let r = match client.get(format!("{u}?name=vpn.insellers.su&type=A")).header("accept", "application/dns-json").timeout(Duration::from_secs(5)).send().await {
+            Ok(x) => match x.text().await { Ok(t) if t.contains(&want0) => Ok(()), Ok(_) => Err("другой ответ".into()), Err(e) => Err(e.to_string()) },
+            Err(e) => Err(e.to_string()),
+        };
+        let host = u.split('/').nth(2).unwrap_or("?").to_string();
+        step(&mut steps, &format!("doh:{host}"), t0, r);
+    }
+    async fn code(c: &reqwest::Client, u: &str) -> Result<u16, String> {
+        c.get(u).timeout(Duration::from_secs(5)).send().await.map(|r| r.status().as_u16()).map_err(|e| e.to_string().chars().take(100).collect())
+    }
+    let t0 = Instant::now();
+    let r = code(client, f["site"].as_str().unwrap_or("")).await.and_then(|c| if (200..300).contains(&c) { Ok(()) } else { Err(format!("http {c}")) });
+    step(&mut steps, "site", t0, r);
+    let t0 = Instant::now();
+    let r = code(client, f["sub"].as_str().unwrap_or("")).await.map(|_| ());
+    step(&mut steps, "sub", t0, r);
+    let srv: Vec<Value> = f["servers"].as_array().cloned().unwrap_or_default();
+    let more: Vec<Value> = tauri::async_runtime::spawn_blocking(move || {
+        let mut st = Vec::new();
+        for s in srv { funnel_srv(s["server"].as_str().unwrap_or("?"), s["ip"].as_str().unwrap_or(""), s["sni"].as_str().unwrap_or("vpn.insellers.su"),
+                                  s["big"].as_str().unwrap_or("/probe/32k"), &mut st); }
+        st
+    }).await.unwrap_or_default();
+    steps.extend(more);
+    if f["whitelist"].is_object() {
+        let t0 = Instant::now();
+        let n = code(client, f["whitelist"]["normal"].as_str().unwrap_or("")).await;
+        let normal = matches!(n, Ok(c) if (200..400).contains(&c));
+        step(&mut steps, "wl:normal", t0, if normal { Ok(()) } else { Err(format!("{n:?}")) });
+        let t0 = Instant::now();
+        let a = code(client, f["whitelist"]["allowed"].as_str().unwrap_or("")).await;
+        let allowed = matches!(a, Ok(c) if (200..400).contains(&c));
+        step(&mut steps, "wl:allowed", t0, if allowed { Ok(()) } else { Err(format!("{a:?}")) });
+        steps.push(json!({"step": "whitelist", "ok": normal || !allowed,
+                          "why": if !normal && allowed { "похоже на белые списки: обычный сайт закрыт, разрешённый открыт" } else { "" }}));
+    }
+    post_measure(client, token, "funnel", json!({"steps": steps, "force": force, "why": if force { "failure" } else { "schedule" }})).await;
 }
 
 /// Нужно ли мерить сейчас (раз в 60 мин; переподключения не учащают).
