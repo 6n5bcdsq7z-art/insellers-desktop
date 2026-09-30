@@ -177,6 +177,47 @@ static WD_FAILS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::ne
 static ALIVE_VIA: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);    // 1 - IPC Tauri, 2 - переход /__native/
 const WD_SILENT_MS: u64 = 15_000;
 
+/// 30.09 (владелец, Алеся на SOVAM): страница не пришла напрямую за 6 с при включённом VPN - окно пересоздаётся с прокси
+/// на локальный вход ядра page-in (страница идёт через туннель) до перезапуска приложения. У части операторов фильтр режет
+/// приветствие шифрования в 2 пакета (у WebKit и WebView2 - постквантовый ключ), а запросы самого приложения проходят.
+/// macOS - прокси окна только с macOS 14. Журнал desktop.page_fallback {why, mac}.
+static PAGE_PROXY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PAGE_DONE_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn mac_major() -> u32 {
+    #[cfg(target_os = "macos")]
+    {
+        return std::process::Command::new("sw_vers").arg("-productVersion").output().ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|v| v.trim().split('.').next().and_then(|x| x.parse().ok())).unwrap_or(0);
+    }
+    #[allow(unreachable_code)]
+    99
+}
+
+fn page_proxy_ok() -> bool { !cfg!(target_os = "macos") || mac_major() >= 14 }
+
+/// Навигация на нашу страницу началась: через 6 с нет ни загрузки, ни сигнала «жива» - запасной путь через туннель.
+fn arm_page_fallback(app: &AppHandle) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if PAGE_PROXY.load(Relaxed) { return; }
+    let started = now_ms();
+    let a = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio_sleep(6).await;
+        if PAGE_PROXY.load(Relaxed) || PAGE_DONE_AT.load(Relaxed) >= started || LAST_ALIVE.load(Relaxed) >= started { return; }
+        if !vpn_running(&a) { return; }
+        if !page_proxy_ok() {
+            remote_log("desktop.page_fallback", serde_json::json!({"why": "slow", "done": false, "mac": mac_major()}));
+            return;
+        }
+        PAGE_PROXY.store(true, Relaxed);
+        remote_log("desktop.page_fallback", serde_json::json!({"why": "slow", "done": true, "mac": mac_major()}));
+        let b = a.clone();
+        let _ = a.run_on_main_thread(move || { let _ = build_main(&b); });
+    });
+}
+
 fn app_url(app: &AppHandle) -> String { format!("https://{HOST}/?app=desktop&v={}", app.package_info().version) }
 
 /// Встроенная заставка в режиме «Переподключаемся…» (macOS/Linux - tauri://localhost, Windows - http://tauri.localhost).
@@ -426,6 +467,10 @@ fn build_main(app: &AppHandle) -> tauri::Result<()> {
     let builder = builder.user_agent(MAC_SAFARI_UA);
     #[cfg(target_os = "windows")]
     let builder = builder.user_agent(WIN_CHROME_UA);
+    // 30.09: запасной путь страницы - прокси окна на вход ядра page-in (см. arm_page_fallback)
+    let builder = if PAGE_PROXY.load(std::sync::atomic::Ordering::Relaxed) {
+        match url::Url::parse(&format!("http://127.0.0.1:{}", vpn::PAGE_PORT)) { Ok(u) => builder.proxy_url(u), Err(_) => builder }
+    } else { builder };
     builder
         .title("INSELLERS VPN")
         .background_color(tauri::window::Color(0, 0, 0, 255))
@@ -448,6 +493,10 @@ fn build_main(app: &AppHandle) -> tauri::Result<()> {
                 return;
             }
             if p.event() == tauri::webview::PageLoadEvent::Started { LOAD_AT.store(now_ms(), std::sync::atomic::Ordering::Relaxed); }
+            if p.url().host_str() == Some(HOST) {
+                if p.event() == tauri::webview::PageLoadEvent::Started { arm_page_fallback(w.app_handle()); }
+                else { PAGE_DONE_AT.store(now_ms(), std::sync::atomic::Ordering::Relaxed); }
+            }
             if p.event() == tauri::webview::PageLoadEvent::Finished && p.url().host_str() == Some(HOST) && vpn_running(w.app_handle()) {
                 let _ = w.eval("if(!window.__INS_VPN||window.__INS_VPN==='disconnected'){window.__INS_VPN='connected';if(!window.__INS_CONN_AT)window.__INS_CONN_AT=Date.now();window.dispatchEvent(new CustomEvent('ins:vpn',{detail:{state:'connected',msg:'',code:''}}))}");
             }
