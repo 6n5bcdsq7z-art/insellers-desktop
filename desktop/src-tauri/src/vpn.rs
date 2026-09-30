@@ -957,6 +957,8 @@ fn kill_child(app: &AppHandle) {
 /// 403 на скрипт (журнал: banner.nofill why=script), Kadam/OnClickA/HilltopAds - «нет рекламы»; без VPN на том же Mac - показ.
 /// gigapub.tech здесь НЕТ: его хосты на Hetzner (в РФ заблокирован) - остаётся в туннеле.
 const AD_DIRECT: &[&str] = &[
+    // 30.09: Adcash (нижний баннер) - по имени; адреса Cloudflare по IP не берём
+    "acscdn.com", "youradexchange.com",
     "sad.adsgram.ai", "api.adsgram.ai", "tma.adsgram.ai", "image.adsgram.ai", "images.adsgram.ai", "adsgram.me",
     "libtl.com", "onclckvd.com", "onclckstr.com", "onclckmetrics.com", "richinfo.co", "adx1.com", "4armn.com",
     "convers.link", "7ool.net", "adp3.net", "munqu.com", "cdn.giga.pub", "mndx1.com", "mvdomnd.com", "pebblepilot.com",
