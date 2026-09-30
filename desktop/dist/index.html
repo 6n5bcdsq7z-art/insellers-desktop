@@ -74,6 +74,25 @@ body.leave{animation:out .35s ease-in forwards}
   var PROBE = 'https://vpn.insellers.su/app/desktop/latest.json';
   var st = document.getElementById('st'), sub = document.getElementById('sub');
   var t0 = Date.now(), fails = 0, done = false, busy = false;
+  // 30.09 (владелец: чёрное окно после 502 во время выкладки): режим «Переподключаемся…» - сюда приложение уводит окно, когда
+  // страница не загрузилась или не отвечает. Повтор каждые 5 с. Сервер проверяет само приложение (server_ok: ответ 200 и «ok»);
+  // прежняя проверка (запрос без чтения ответа) принимала 502 за «сервер жив».
+  var RECON = /[?&]reconnect=/.test(location.search);
+  var TI = window.__TAURI_INTERNALS__;
+  function check() {
+    if (TI && TI.invoke) {
+      var down = new Error('down');
+      return TI.invoke('server_ok').then(function (ok) { if (!ok) throw down; }, function () { return plain(); })
+        .catch(function (e) { if (e === down) throw e; return plain(); });
+    }
+    return plain();
+  }
+  function plain() {
+    var ctl = window.AbortController ? new AbortController() : null;
+    var to = setTimeout(function () { if (ctl) ctl.abort(); }, 5000);
+    return fetch(PROBE + '?t=' + Date.now(), { mode: 'no-cors', cache: 'no-store', signal: ctl ? ctl.signal : undefined })
+      .then(function () { clearTimeout(to); }, function (e) { clearTimeout(to); throw e; });
+  }
 
   function say(a, b) { if (st.textContent !== a) st.textContent = a; if (sub.textContent !== b) sub.textContent = b; }
 
@@ -86,17 +105,16 @@ body.leave{animation:out .35s ease-in forwards}
 
   function probe() {
     if (done || busy) return; busy = true;
-    var ctl = window.AbortController ? new AbortController() : null;
-    var to = setTimeout(function () { if (ctl) ctl.abort(); }, 5000);
-    fetch(PROBE + '?t=' + Date.now(), { mode: 'no-cors', cache: 'no-store', signal: ctl ? ctl.signal : undefined })
-      .then(function () { clearTimeout(to); busy = false; go(); })
-      .catch(function () { clearTimeout(to); busy = false; fails++; status(); setTimeout(probe, fails < 5 ? 1500 : 3000); });
+    check()
+      .then(function () { busy = false; go(); })
+      .catch(function () { busy = false; fails++; status(); setTimeout(probe, RECON ? 5000 : (fails < 5 ? 1500 : 3000)); });
   }
 
   function status() {
     var off = navigator.onLine === false;
     document.body.classList.toggle('off', off);
     if (off) say('Ждём интернет', 'Подключите Wi-Fi или раздачу с телефона — приложение откроется само');
+    else if (RECON) say('Переподключаемся', 'Сервер обновляется или связь прервалась. Пробуем каждые 5 секунд - ничего нажимать не нужно');
     else if (fails >= 4) say('Ищем сервер', 'Сервер пока не отвечает. Пробуем ещё — ничего нажимать не нужно');
     else say('Идёт подключение', '');
   }
@@ -104,7 +122,7 @@ body.leave{animation:out .35s ease-in forwards}
   window.addEventListener('online', function () { fails = 0; status(); probe(); });
   window.addEventListener('offline', status);
   status();
-  probe();
+  if (RECON) setTimeout(probe, 5000); else probe();       // экран переподключения: первая попытка через 5 с
 })();
 </script>
 </body>
