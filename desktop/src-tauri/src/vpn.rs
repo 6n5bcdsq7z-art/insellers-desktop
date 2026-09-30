@@ -523,7 +523,7 @@ static HOT_CUR: Mutex<String> = Mutex::new(String::new());
 /// 27.09 (п.5): выходы, замёрзшие недавно (тег, до какого момента не брать)
 static HOT_BAD: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
 fn set_cur_desc(d: &str) { *CUR_DESC.lock().unwrap() = d.to_string(); }
-fn cur_desc() -> String { CUR_DESC.lock().unwrap().clone() }
+pub(crate) fn cur_desc() -> String { CUR_DESC.lock().unwrap().clone() }
 fn manual_choice(choice: &str) -> bool { choice == "reality" || choice == "xhttp" || choice == "hysteria2" || choice.starts_with("cfg:") }
 
 /// Описание пути для центра диагностики: вид@адрес (xhttp@212.34.151.212); у балансировщика - "auto".
@@ -677,8 +677,8 @@ async fn freeze_watch(app: AppHandle, dir: PathBuf, gen: u32) {
             let from = cur_desc();
             if let Some(to) = hot_switch(&app, &dir, &cur).await {
                 *HOT_CUR.lock().unwrap() = to.clone();
-                crate::remote_log("vpn.hot_switch", json!({"from": from, "to": to, "how": "freeze",
-                    "detect_ms": crate::now_ms().saturating_sub(t0), "gap_ms": crate::now_ms().saturating_sub(t0)}));
+                crate::remote_log("vpn.hot_switch", crate::telemetry::switch_fields(json!({"from": from, "to": to, "how": "freeze",
+                    "detect_ms": crate::now_ms().saturating_sub(t0), "gap_ms": crate::now_ms().saturating_sub(t0)}), "no_traffic"));
             } else {
                 crate::remote_log("vpn.freeze", json!({"from": from, "cur": cur, "switched": false}));
             }
@@ -916,7 +916,7 @@ fn launch(app: &AppHandle, bin: &str, run_args: Vec<String>, dir: &PathBuf) -> R
     let a = app.clone();
     tauri::async_runtime::spawn(async move {
         while let Some(ev) = rx.recv().await {
-            if let CommandEvent::Terminated(_) = ev {
+            if let CommandEvent::Terminated(tp) = ev {
                 // это наш процесс? Если его уже забрали (отключили, сменили путь) - ничего не делаем
                 let mine = {
                     let st = a.state::<VpnState>();
@@ -925,6 +925,8 @@ fn launch(app: &AppHandle, bin: &str, run_args: Vec<String>, dir: &PathBuf) -> R
                 };
                 if !mine { break; }
                 if !wanted(&a) { break; }   // ещё проверяем путь или уже отключились - решает start()
+                crate::telemetry::core_panic("ядро завершилось", tp.code);   // 01.10: ядро упало само, пока VPN нужен
+                crate::telemetry::set_stop_reason("core_crash");
                 let ks = crate::pref("killswitch");
                 if !ks { crate::tun::down(); set_proxy(false); }   // Kill Switch: прокси остаётся на мёртвом порту - интернет на паузе
                 if crate::pref("reconnect") {
@@ -1207,6 +1209,7 @@ pub fn notify_code(app: &AppHandle, state: &str, msg: &str, code: &str) {
 }
 
 pub fn stop(app: &AppHandle) {
+    crate::telemetry::disconnect();   // 01.10: vpn.disconnect (сколько был подключён, байты, причина)
     set_wanted(app, false);   // любая остановка из приложения — не переподключаемся
     bump_gen(app);            // незаконченный запуск, сторож и гостевой таймер старого подключения больше не действуют
     crate::tun::down();       // TUN (26.09): весь трафик системы снова идёт как без VPN
@@ -1773,7 +1776,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                         }
                     } else if let Some(to) = { let t0 = crate::now_ms(); let hc = HOT_CUR.lock().unwrap().clone(); hot_switch(&h, &h_dir, &hc).await.map(|t| (t, t0)) } {
                         // этап 7: без перезапуска ядра
-                        crate::remote_log("vpn.hot_switch", json!({"from": dead_desc, "to": to.0, "gap_ms": crate::now_ms().saturating_sub(to.1)}));
+                        crate::remote_log("vpn.hot_switch", crate::telemetry::switch_fields(json!({"from": dead_desc, "to": to.0, "gap_ms": crate::now_ms().saturating_sub(to.1)}), "handshake_fail"));
                         *HOT_CUR.lock().unwrap() = to.0;
                         fails = 0;
                         if degraded { degraded = false; }
@@ -1787,8 +1790,8 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                             if !wanted(&b) { return; }
                             match tauri::async_runtime::block_on(start(b.clone())) {
                                 Ok(()) => {
-                                    crate::remote_log("vpn.path_switch", json!({"from": dead, "from_desc": dead_desc, "to": cur_path(),
-                                        "to_desc": cur_desc(), "secs": crate::now_ms().saturating_sub(t_fail) / 1000}));
+                                    crate::remote_log("vpn.path_switch", crate::telemetry::switch_fields(json!({"from": dead, "from_desc": dead_desc, "to": cur_path(),
+                                        "to_desc": cur_desc(), "secs": crate::now_ms().saturating_sub(t_fail) / 1000}), "handshake_fail"));
                                     notify(&b, "connected", "Соединение восстановлено");
                                 }
                                 Err(e) if e == "CANCELLED" || e == "BUSY" => {}

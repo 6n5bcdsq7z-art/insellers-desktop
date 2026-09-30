@@ -9,6 +9,7 @@ mod check;
 mod probe;
 mod tun;
 mod upd;
+mod telemetry;
 
 use std::time::Duration;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -129,38 +130,79 @@ pub fn install_id() -> String {
     "unknown".into()
 }
 
-/// Диагностический лог на сервер (без секретов).
-// 29.09: события без сети (после сна) терялись - за 7 дней ни одного sys.wake. Не дошло - в очередь (до 100), уходит со следующим.
+/// Диагностический лог на сервер (без секретов). 01.10 (владелец, схема sv=2 - как мини-апп applog.js): контекст install, sid, sv, platform,
+/// version, vpn, path; очередь <= 300, склейка одинаковых событий за 60 с (счётчик n), пачка по 50 - раз в 30 с, при 50 событиях, при
+/// событиях связи и при скрытии окна / выходе (flush_logs); 5xx / 429 / нет сети - повтор с растущей паузой 4 с ... 5 мин.
 static LOG_QUEUE: std::sync::Mutex<Vec<serde_json::Value>> = std::sync::Mutex::new(Vec::new());
+static LOG_BACKOFF: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LOG_FAIL_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LOG_SENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LOG_TIMER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LOG_SID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 pub fn remote_log(ev: &str, data: serde_json::Value) {
-    let ev = ev.to_string();
-    tauri::async_runtime::spawn(async move {
+    use std::sync::atomic::Ordering;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let (n, urgent) = {
+        let mut q = LOG_QUEUE.lock().unwrap();
+        let key = data.to_string();
+        if let Some(e) = q.iter_mut().rev().find(|e| e["ev"] == ev && now.saturating_sub(e["ts"].as_u64().unwrap_or(0)) < 60 && e["_k"] == key.as_str()) {
+            e["n"] = serde_json::json!(e["n"].as_u64().unwrap_or(1) + 1);
+        } else {
+            q.push(serde_json::json!({"ts": now, "ev": ev, "data": data, "_k": key}));
+        }
+        if q.len() > 300 {
+            let mut i = 0;
+            while q.len() > 300 && i < q.len() { if q[i]["ev"].as_str().unwrap_or("").starts_with("perf.") { q.remove(i); } else { i += 1; } }
+            let over = q.len().saturating_sub(300); q.drain(..over);
+        }
+        (q.len(), ev.starts_with("vpn.") || ev.starts_with("net.") || ev.starts_with("update."))
+    };
+    if !LOG_TIMER.swap(true, Ordering::Relaxed) {
+        tauri::async_runtime::spawn(async { loop { tokio_sleep(30).await; flush_logs(false).await; } });
+    }
+    if n >= 50 || urgent { tauri::async_runtime::spawn(async { flush_logs(false).await; }); }
+}
+
+/// Отправить накопленное (force - мимо паузы: окно скрыто / выход).
+pub async fn flush_logs(force: bool) {
+    use std::sync::atomic::Ordering;
+    if LOG_SENDING.swap(true, Ordering::Relaxed) { return; }
+    loop {
+        if !force && LOG_BACKOFF.load(Ordering::Relaxed) > 0 && now_ms() < LOG_FAIL_AT.load(Ordering::Relaxed) { break; }
+        let batch: Vec<serde_json::Value> = { let q = LOG_QUEUE.lock().unwrap(); q.iter().take(50).cloned().collect() };
+        if batch.is_empty() { break; }
         let os = if cfg!(target_os = "macos") { "mac" } else if cfg!(target_os = "windows") { "windows" } else { "linux" };
-        let this = serde_json::json!({"ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0), "ev": ev, "data": data});
-        let mut evs: Vec<serde_json::Value> = std::mem::take(&mut *LOG_QUEUE.lock().unwrap());
-        evs.push(this);
-        let body = serde_json::json!({
-            "ctx": {"install": install_id(), "platform": format!("desktop-{os}-native"), "version": env!("CARGO_PKG_VERSION")},
-            "events": evs.clone()
-        });
-        // 26.09: сначала мимо системного прокси (= нашего туннеля): событие «путь умер» через мёртвый путь не дошло бы,
-        // и сервер видит IP провайдера, а не нашего сервера. Не вышло напрямую - через системный прокси.
+        let sid = LOG_SID.get_or_init(|| format!("{:x}", now_ms())).clone();
+        let evs: Vec<serde_json::Value> = batch.iter().map(|e| { let mut d = e["data"].clone(); if let Some(n) = e["n"].as_u64() { d["n"] = serde_json::json!(n); }
+            serde_json::json!({"ts": e["ts"], "ev": e["ev"], "data": d}) }).collect();
+        let body = serde_json::json!({"ctx": {"install": install_id(), "platform": format!("desktop-{os}-native"), "version": env!("CARGO_PKG_VERSION"),
+                                              "sid": sid, "sv": 2, "path": vpn::cur_path()}, "events": evs});
+        // 26.09: сначала мимо системного прокси (= нашего туннеля): событие «путь умер» через мёртвый путь не дошло бы
         let t = load_token();
+        let mut code = 0u16;
         for direct in [true, false] {
             let b = reqwest::Client::builder().timeout(Duration::from_secs(10));
             let b = if direct { b.no_proxy() } else { b };
             if let Ok(c) = b.build() {
                 let mut rq = c.post(format!("{BASE}/api/app/log")).json(&body);
                 if !t.is_empty() { rq = rq.header("X-App-Token", t.clone()); }
-                if rq.send().await.map(|r| r.status().is_success()).unwrap_or(false) { return; }
+                if let Ok(r) = rq.send().await { code = r.status().as_u16(); if r.status().is_success() { break; } }
             }
         }
-        let mut q = LOG_QUEUE.lock().unwrap();
-        let mut keep = evs; keep.extend(q.drain(..));
-        let n = keep.len();
-        *q = keep.into_iter().skip(n.saturating_sub(100)).collect();
-    });
+        if (200..300).contains(&code) || ((400..500).contains(&code) && code != 429) {   // принято или отвергнуто навсегда - убираем
+            let mut q = LOG_QUEUE.lock().unwrap();
+            let sent: std::collections::HashSet<String> = batch.iter().map(|e| e.to_string()).collect();
+            q.retain(|e| !sent.contains(&e.to_string()));
+            LOG_BACKOFF.store(0, Ordering::Relaxed);
+        } else {
+            let b = LOG_BACKOFF.load(Ordering::Relaxed);
+            let nb = if b == 0 { 4_000 } else { (b * 2).min(300_000) };
+            LOG_BACKOFF.store(nb, Ordering::Relaxed); LOG_FAIL_AT.store(now_ms() + nb, Ordering::Relaxed);
+            break;
+        }
+    }
+    LOG_SENDING.store(false, Ordering::Relaxed);
 }
 
 /// 30.09 (владелец: окно на Mac ушло в чёрный экран - страница перезагрузилась в 10 с перезапуска сервера, получила 502 и
@@ -714,9 +756,9 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             "toggle" => {
                 let a = app.clone();
                 if vpn_running(app) { vpn_disconnect(a); }
-                else { tauri::async_runtime::spawn(async move { let _ = vpn_connect(a).await; }); }
+                else { telemetry::set_trigger("manual"); tauri::async_runtime::spawn(async move { let _ = vpn_connect(a).await; }); }
             }
-            "quit" => { vpn::set_wanted(app, false); vpn::stop(app); app.exit(0); }
+            "quit" => { telemetry::set_stop_reason("user"); vpn::set_wanted(app, false); vpn::stop(app); tauri::async_runtime::block_on(flush_logs(true)); app.exit(0); }
             _ => {}
         })
         .on_tray_icon_event(|tray, e| {
@@ -757,7 +799,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                 rx += d.received(); tx += d.transmitted();
             }
             let on = vpn_running(&h);
-            if on { session_bytes = session_bytes.saturating_add(rx + tx); } else { session_bytes = 0; }
+            if on { session_bytes = session_bytes.saturating_add(rx + tx); telemetry::tick(rx, tx); } else { session_bytes = 0; }
             if let Some(w) = h.get_webview_window("main") { let _ = w.eval(&format!("window.__INS_BYTES={session_bytes}")); }
             let (down, up) = (fmt_rate(rx as f64 / 2.0), fmt_rate(tx as f64 / 2.0));
             if let Some(items) = h.try_state::<TrayItems>() {
@@ -791,7 +833,7 @@ async fn native_cmd(app: AppHandle, cmd: &str, arg: serde_json::Value) {
         "set_token" => set_token(app, arg["token"].as_str().unwrap_or_default().to_string()),
         "open_external" => open_external(app, arg["url"].as_str().unwrap_or_default().to_string()),
         "check_update" => { let _ = check_update(app, Some(arg["manual"].as_bool().unwrap_or(false))).await; }
-        "vpn_connect" => { let _ = vpn_connect(app).await; }
+        "vpn_connect" => { telemetry::set_trigger("manual"); let _ = vpn_connect(app).await; }
         "vpn_guest" => {
             let url = arg["url"].as_str().unwrap_or_default().to_string();
             let until = now_ms() + GUEST_MAX_MS;
@@ -893,12 +935,20 @@ fn swap_token(app: &AppHandle, token: &str) {
 
 #[tauri::command]
 async fn vpn_connect(app: AppHandle) -> Result<(), String> {
+    // 01.10 (владелец): портал Wi-Fi - сначала войти в сеть (иначе ложные «не подключается»); повтор в течение минуты - без проверки
+    if !vpn_running(&app) && telemetry::captive().await {
+        vpn::notify_code(&app, "error", "Авторизуйтесь в сети Wi-Fi: откройте любой сайт в браузере, войдите в сеть и нажмите «Подключить» ещё раз", "captive");
+        return Err("CAPTIVE".into());
+    }
     vpn::notify(&app, "connecting", "");
+    telemetry::attempt("");
     match vpn::start(app.clone()).await {
-        Ok(()) => { remote_log("vpn.connected", serde_json::json!({})); vpn::notify(&app, "connected", &vpn::take_connect_msg()); Ok(()) }
+        Ok(()) => { remote_log("vpn.connected", serde_json::json!({})); telemetry::result("connected", "", ""); vpn::notify(&app, "connected", &vpn::take_connect_msg()); Ok(()) }
         Err(e) if e == "BUSY" => Err(e),   // подключение уже идёт — второй раз не запускаем
-        Err(e) if e == "CANCELLED" => { vpn::notify(&app, "disconnected", ""); Err(e) }   // нажали «Отключить» во время подключения
+        Err(e) if e == "CANCELLED" => { telemetry::result("cancelled", "", ""); vpn::notify(&app, "disconnected", ""); Err(e) }   // нажали «Отключить» во время подключения
         Err(e) => {
+            let stage = if e.starts_with("OTHER_VPN:") { "tunnel" } else if e.contains("подписк") || e.contains("доступ") || e.contains("конфиг") { "config" } else { "handshake" };
+            telemetry::result("failed", stage, &e);
             remote_log("vpn.start_error", serde_json::json!({"err": e}));
             vpn::stop(&app);
             // код other_vpn — страница покажет подсказку
@@ -911,6 +961,7 @@ async fn vpn_connect(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn vpn_disconnect(app: AppHandle) {
+    telemetry::set_stop_reason("user");
     vpn::set_wanted(&app, false);
     vpn::stop(&app);
     vpn::notify(&app, "disconnected", "");
@@ -1061,6 +1112,7 @@ fn main() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event { let _ = window.hide(); api.prevent_close(); }
             // 30.09: окно снова перед глазами - сторож отсчитывает 15 с заново (таймеры скрытой страницы спят)
             if let tauri::WindowEvent::Focused(true) = event { SEEN_AT.store(now_ms(), std::sync::atomic::Ordering::Relaxed); }
+            if let tauri::WindowEvent::Focused(false) = event { tauri::async_runtime::spawn(async { flush_logs(true).await; }); }   // 01.10: окно ушло - журнал сразу
         })
         .setup(|app| {
             remote_log("app.start", serde_json::json!({"hasToken": !load_token().is_empty()}));
@@ -1093,7 +1145,7 @@ fn main() {
                         if ok { break; }
                         tokio_sleep(4).await;
                     }
-                    if !vpn_running(&h) { let _ = vpn_connect(h).await; }   // человек мог уже подключиться сам
+                    if !vpn_running(&h) { telemetry::set_trigger("startup"); let _ = vpn_connect(h).await; }   // человек мог уже подключиться сам
                 });
             }
             let h = app.handle().clone();
