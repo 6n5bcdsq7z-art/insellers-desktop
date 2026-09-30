@@ -326,6 +326,35 @@ fn page_failed(app: AppHandle, why: String) { on_page_failed(&app, &why); }
 fn page_crashed(ago: Option<u64>, nav: Option<String>) { on_page_crashed(&serde_json::json!({"ago": ago.unwrap_or(0), "nav": nav.unwrap_or_default()})); }
 
 /// Для заставки: сервер страницы отвечает по-настоящему (200 и «ok»), а не 502 - сначала напрямую, потом через системный прокси.
+/// 30.09 (владелец): кнопка «Отправить отчёт об ошибке» на экране загрузки (как на Android). Обращение уходит запросом самого
+/// приложения (не страницы): напрямую, не вышло - через вход ядра (туннель), потом через сервер NL-2. Владельцу - как «Не работает?».
+#[tauri::command]
+async fn splash_report(app: AppHandle, why: String, secs: u64) -> bool {
+    let tok = load_token();
+    let why: String = why.chars().take(120).collect();
+    let body = serde_json::json!({
+        "text": format!("Экран загрузки приложения на компьютере: «{why}», {secs} с"),
+        "n_img": 0,
+        "diag": {"platform": format!("desktop-{}", std::env::consts::OS), "version": app.package_info().version.to_string(),
+                 "model": host_model(), "os": std::env::consts::OS, "vpn": if vpn_running(&app) { "connected" } else { "disconnected" },
+                 "page": "splash", "splash": why, "secs": secs}
+    });
+    remote_log("splash.report", serde_json::json!({"why": why, "secs": secs}));
+    let tries: [(&str, Option<u16>); 3] = [(BASE, None), (BASE, Some(vpn::PROBE_PORT)), (BASE_ALT, None)];
+    for (base, proxy) in tries {
+        let b = reqwest::Client::builder().timeout(Duration::from_secs(12));
+        let b = match proxy {
+            Some(p) => match reqwest::Proxy::all(format!("http://127.0.0.1:{p}")) { Ok(px) => b.proxy(px), Err(_) => continue },
+            None => b.no_proxy(),
+        };
+        let Ok(c) = b.build() else { continue };
+        let mut rq = c.post(format!("{base}/api/app/feedback")).json(&body);
+        if !tok.is_empty() { rq = rq.header("X-App-Token", tok.clone()); }
+        if let Ok(r) = rq.send().await { if r.status().is_success() { return true; } }
+    }
+    false
+}
+
 #[tauri::command]
 async fn server_ok() -> bool {
     for direct in [true, false] {
@@ -1018,7 +1047,7 @@ fn main() {
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .manage(vpn::VpnState::default())
         .invoke_handler(tauri::generate_handler![login, logout, set_token, open_external, check_update, vpn_connect, vpn_disconnect,
-                                                 page_alive, page_failed, page_crashed, server_ok])
+                                                 page_alive, page_failed, page_crashed, server_ok, splash_report])
         .on_window_event(|window, event| {
             // закрытие окна — сворачиваем в трей, VPN продолжает работать; выход — через меню значка
             if let tauri::WindowEvent::CloseRequested { api, .. } = event { let _ = window.hide(); api.prevent_close(); }
