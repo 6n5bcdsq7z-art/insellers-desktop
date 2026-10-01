@@ -45,7 +45,9 @@ body{display:flex;flex-direction:column;align-items:center;justify-content:cente
 body.off .bar::after{animation-duration:2.6s;opacity:.5}
 body.leave{animation:out .35s ease-in forwards}
 @keyframes out{to{opacity:0}}
-.rep{position:fixed;left:50%;bottom:86px;transform:translateX(-50%);padding:10px 18px;border-radius:12px;border:1px solid rgba(227,189,98,.55);
+/* 02.10 00:16 (владелец): кнопка отчёта - через 3 секунды, в начале может быть просто плохой интернет */
+@keyframes repin{to{opacity:1;visibility:visible}}
+.rep{opacity:0;visibility:hidden;animation:repin .6s ease-out 3s forwards;position:fixed;left:50%;bottom:86px;transform:translateX(-50%);padding:10px 18px;border-radius:12px;border:1px solid rgba(227,189,98,.55);
   background:rgba(20,15,6,.85);color:#f3d58a;font:600 13px system-ui,-apple-system,sans-serif;cursor:pointer;white-space:nowrap}
 .rep.ok{border-color:#3fbf6a;color:#7ee29a;cursor:default}
 .rep-note{position:fixed;left:24px;right:24px;bottom:128px;margin:0;text-align:center;color:rgba(243,213,138,.7);font:12px system-ui,-apple-system,sans-serif}
