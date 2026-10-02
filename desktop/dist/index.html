@@ -52,7 +52,29 @@ body.leave{animation:out .35s ease-in forwards}
 .rep.ok{border-color:#3fbf6a;color:#7ee29a;cursor:default}
 .rep-note{position:fixed;left:24px;right:24px;bottom:128px;margin:0;text-align:center;color:rgba(243,213,138,.7);font:12px system-ui,-apple-system,sans-serif}
 @media (prefers-reduced-motion:reduce){.ring,.ring2,.shield,.orb::before,.mark,.bar::after{animation:none}}
+/* 02.10 (владелец): светлая тема - слоновая кость + тёмное золото (как light.css мини-аппа) */
+html[data-theme="light"]{background:#faf7f2}
+html[data-theme="light"] body{background:radial-gradient(70% 45% at 50% 42%,#f3e7cd 0%,#f7f1e4 55%,#faf7f2 100%);color:#4a3a18}
+html[data-theme="light"] .st{color:#4a3a18}
+html[data-theme="light"] .sub{color:#6e6250}
+html[data-theme="light"] .dots i{background:#9a6c1c}
+html[data-theme="light"] .bar{background:rgba(138,95,24,.15)}
 </style>
+<script>
+// 02.10 (владелец): английский язык заставки - ?l=en при запуске / insLang('en') из приложения (по выбору на странице)
+(function () {
+  var EN = {"Включите Wi-Fi или мобильный интернет — приложение откроется само": "Turn on Wi-Fi or mobile internet - the app will open by itself", "Долго грузится? Отправьте отчёт об ошибке - мы оперативно исправим проблему": "Taking too long? Send an error report - we'll fix the problem quickly", "Ждём интернет": "Waiting for the internet", "Загружаем": "Loading", "Идёт подключение": "Connecting", "Ищем сервер": "Looking for a server", "Не отправилось - ещё раз": "Not sent - try again", "Нет связи - отчёт уйдёт сам, как только связь появится": "No connection - the report will be sent as soon as the connection returns", "Отправить отчёт об ошибке": "Send an error report", "Отправляем…": "Sending…", "Отчёт отправлен ✓": "Report sent ✓", "Переподключаемся": "Reconnecting", "Подключите Wi-Fi или раздачу с телефона — приложение откроется само": "Connect to Wi-Fi or a phone hotspot - the app will open by itself", "Сервер обновляется или связь прервалась. Пробуем каждые 5 секунд - ничего нажимать не нужно": "The server is updating or the connection dropped. Retrying every 5 seconds - no need to tap anything", "Сервер пока не отвечает. Пробуем ещё — ничего нажимать не нужно": "The server isn't responding yet. Retrying - no need to tap anything", "Спасибо! Уже разбираемся": "Thank you! We're already looking into it"}, on = /[?&]l=en/.test(location.search) || !!window.__INS_LANG_EN, CYR = /[А-Яа-яЁё]/;
+  function tr(n) { var t = (n.data || '').trim(); if (on && EN[t]) n.data = n.data.replace(t, EN[t]); }
+  function all() { var w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null), n; while ((n = w.nextNode())) if (CYR.test(n.data)) tr(n); }
+  window.insLang = function (l) { on = l === 'en'; document.documentElement.lang = on ? 'en' : 'ru'; if (on) all(); };
+  document.addEventListener('DOMContentLoaded', function () {
+    if (on) { document.documentElement.lang = 'en'; all(); }
+    new MutationObserver(function (ms) { if (!on) return; ms.forEach(function (m) {
+      if (m.type === 'characterData') tr(m.target); else m.addedNodes.forEach(function (x) { if (x.nodeType === 3) tr(x); else if (x.nodeType === 1) { var w = document.createTreeWalker(x, NodeFilter.SHOW_TEXT, null), n; while ((n = w.nextNode())) tr(n); } }); }); })
+      .observe(document.body, { childList: true, subtree: true, characterData: true });
+  });
+})();
+</script>
 </head>
 <body>
   <div class="orb">
