@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-pub const HELPER_VERSION: &str = "1";
+pub const HELPER_VERSION: &str = "2";   // 02.10: ключ 600 + down с ключом - переустановка помощника (один запрос пароля)
 const HELPER_ADDR: &str = "127.0.0.1:38811";
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static BYPASS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
@@ -88,7 +88,10 @@ mkdir -p "$D"
 cp -f '{src}/ins-helper' '{src}/sing-box' "$D/"
 chown -R root:wheel "$D"; chmod 755 "$D" "$D/ins-helper" "$D/sing-box"
 [ -s "$D/token" ] || /usr/bin/openssl rand -hex 16 > "$D/token"
-chmod 644 "$D/token"
+# 02.10 (безопасность): ключ помощника читает только тот, кто сидит за компьютером (раньше 644 - любой процесс любого пользователя
+# мог приказать помощнику от root поднять TUN на свой SOCKS и увести трафик). Пользователь консоли, не root из osascript.
+U=$(/usr/bin/stat -f %Su /dev/console 2>/dev/null || echo root)
+chown "$U" "$D/token"; chmod 600 "$D/token"
 cat > /Library/LaunchDaemons/su.insellers.helper.plist <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -122,6 +125,10 @@ Stop-ScheduledTask -TaskName 'INSELLERS VPN Helper' -ErrorAction SilentlyContinu
 Get-Process ins-helper -ErrorAction SilentlyContinue | Stop-Process -Force
 Copy-Item -Force '{src}\ins-helper.exe','{src}\sing-box.exe' $D
 if (!(Test-Path "$D\token")) {{ [guid]::NewGuid().ToString('N') | Out-File -Encoding ascii "$D\token" }}
+# 02.10 (безопасность): ключ помощника - только пользователю за компьютером и SYSTEM/Администраторам (раньше наследовал права папки:
+# читал любой пользователь). Пользователь - кто вошёл в систему, а не кто ввёл пароль администратора в UAC.
+$U = (Get-CimInstance Win32_ComputerSystem).UserName
+if ($U) {{ icacls "$D\token" /inheritance:r /grant:r "${{U}}:R" "SYSTEM:F" "*S-1-5-32-544:F" | Out-Null }}
 $a = New-ScheduledTaskAction -Execute "$D\ins-helper.exe"
 $t = New-ScheduledTaskTrigger -AtStartup
 $s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
@@ -164,7 +171,9 @@ pub fn up(socks: u16, bypass: &[String], dns: &str) -> Result<(), String> {
 
 pub fn down() {
     if ACTIVE.swap(false, Ordering::SeqCst) || helper_running() {
-        let _ = call(&json!({"cmd": "down"}), 10);
+        // 02.10 (безопасность): down тоже с ключом - чужой процесс не должен снимать TUN (трафик мимо VPN без ведома человека)
+        let token = std::fs::read_to_string(helper_dir().join("token")).unwrap_or_default();
+        let _ = call(&json!({"cmd": "down", "token": token.trim()}), 10);
     }
 }
 
