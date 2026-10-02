@@ -11,6 +11,10 @@ on:
         description: "Что нового (показывается в обновлении)"
         required: false
         default: ""
+      notes_en:
+        description: "What's new in English (notes_en; empty - the block is hidden for English)"
+        required: false
+        default: ""
       stage:
         description: "candidate - собрать и загрузить, людям НЕ публиковать (выпуск - workflow promote); all - сразу всем"
         required: false
@@ -201,6 +205,7 @@ jobs:
         env:
           KEY: ${{ secrets.DESKTOP_UPLOAD_KEY }}
           NOTES: ${{ github.event.inputs.notes }}
+          NOTES_EN: ${{ github.event.inputs.notes_en }}
           STAGE: ${{ github.event.inputs.stage || 'all' }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -236,6 +241,7 @@ jobs:
           latest = {
             "version": os.environ["VER"],
             "notes": os.environ.get("NOTES") or "Обновление INSELLERS VPN",
+            **({"notes_en": os.environ["NOTES_EN"]} if os.environ.get("NOTES_EN", "").strip() else {}),
             "pub_date": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
             "platforms": {
               "windows-x86_64": {"signature": sig("$WIN.sig"), "url": base + "INSELLERS-VPN-setup.exe"},
