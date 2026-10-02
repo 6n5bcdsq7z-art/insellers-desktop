@@ -90,7 +90,7 @@ pub fn guest_until() -> u64 { guest_load().map(|(_, u)| u).unwrap_or(0) }
 
 /// Настройки поведения на этом компьютере (prefs.json рядом с данными приложения).
 pub fn prefs() -> serde_json::Value {
-    let mut v = serde_json::json!({"autoconnect": true, "reconnect": true, "killswitch": false});
+    let mut v = serde_json::json!({"autoconnect": true, "reconnect": true, "killswitch": false, "theme_light": false});
     if let Some(p) = data_path("prefs.json") {
         if let Ok(t) = std::fs::read_to_string(p) {
             if let Ok(serde_json::Value::Object(m)) = serde_json::from_str::<serde_json::Value>(&t) {
@@ -507,6 +507,7 @@ fn init_script(token: &str, version: &str) -> String {
     openExternal: function (u) {{ inv("open_external", {{ url: u }}); }},
     connect: function () {{ inv("vpn_connect"); }},
     disconnect: function () {{ inv("vpn_disconnect"); }},
+    setTheme: function (t) {{ inv("set_theme", {{ theme: String(t) }}); }},
     hasVpn: function () {{ return true; }},
     hasAwg: function () {{ return true; }},
     connectGuest: function (u, t) {{ inv("vpn_guest", {{ url: String(u), until: String(t) }}); }},
@@ -592,6 +593,11 @@ const WIN_CHROME_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebK
 #[cfg(target_os = "macos")]
 const MAC_SAFARI_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15";
 
+/// 02.10: фон окна под тему страницы (светлая - слоновая кость, как light.css)
+fn theme_bg(light: bool) -> tauri::window::Color {
+    if light { tauri::window::Color(0xfa, 0xf7, 0xf2, 255) } else { tauri::window::Color(0, 0, 0, 255) }
+}
+
 fn build_main(app: &AppHandle) -> tauri::Result<()> {
     if let Some(w) = app.get_webview_window("main") { let _ = w.destroy(); }
     let token = load_token();
@@ -614,7 +620,9 @@ fn build_main(app: &AppHandle) -> tauri::Result<()> {
     } else { builder };
     builder
         .title("INSELLERS VPN")
-        .background_color(tauri::window::Color(0, 0, 0, 255))
+        .background_color(theme_bg(pref("theme_light")))
+        // 02.10: заставка (локальная страница) - в теме, которую человек выбрал на странице
+        .initialization_script(if pref("theme_light") { "if(location.host!==\"vpn.insellers.su\")document.documentElement.setAttribute(\"data-theme\",\"light\");" } else { "" })
         .inner_size(430.0, 880.0)
         .min_inner_size(380.0, 700.0)
         .resizable(true)
@@ -846,6 +854,13 @@ async fn native_cmd(app: AppHandle, cmd: &str, arg: serde_json::Value) {
         }
         "vpn_disconnect" => vpn_disconnect(app),
         "set_pref" => set_pref(&app, arg["key"].as_str().unwrap_or_default(), arg["value"].as_bool().unwrap_or(false)),
+        // 02.10 (владелец): тема страницы - фон окна и заставка под неё (запоминается в prefs.json)
+        "set_theme" => {
+            let light = arg["theme"].as_str() == Some("light");
+            let mut v = prefs(); v["theme_light"] = serde_json::Value::Bool(light);
+            if let Some(p) = data_path("prefs.json") { write_private(&p, &v.to_string()); }
+            if let Some(w) = app.get_webview_window("main") { let _ = w.set_background_color(Some(theme_bg(light))); }
+        }
         "probe" => {
             let (ok, ms, how) = vpn::tunnel_check().await;
             if let Some(w) = app.get_webview_window("main") {
