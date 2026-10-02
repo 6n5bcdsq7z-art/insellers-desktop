@@ -737,10 +737,26 @@ fn start_pulse(h: AppHandle) {
     });
 }
 
-struct TrayItems { status: tauri::menu::MenuItem<tauri::Wry>, toggle: tauri::menu::MenuItem<tauri::Wry> }
+struct TrayItems { status: tauri::menu::MenuItem<tauri::Wry>, toggle: tauri::menu::MenuItem<tauri::Wry>,
+                   open: tauri::menu::MenuItem<tauri::Wry>, quit: tauri::menu::MenuItem<tauri::Wry> }
 
 fn vpn_running(app: &AppHandle) -> bool {
     app.try_state::<vpn::VpnState>().map(|s| s.child.lock().unwrap().is_some()).unwrap_or(false)
+}
+
+/// 02.10 (владелец): меню в трее, подсказка и строка меню - на языке страницы (prefs lang_en, мост setLang).
+/// Тексты в коде русские; здесь - английские (смысл как в общем словаре i18n/en.json).
+fn l10n(en: bool, s: &str) -> String {
+    if !en { return s.to_string(); }
+    let mut t = s.to_string();
+    for (ru, e) in [("⬆ Вышло обновление!", "⬆ An update is out!"), ("INSELLERS VPN - не подключено", "INSELLERS VPN - not connected"),
+                    ("INSELLERS VPN - защищено", "INSELLERS VPN - protected"), ("Открыть INSELLERS VPN", "Open INSELLERS VPN"),
+                    ("Не подключено", "Not connected"), ("Подключено", "Connected"), ("Отключить", "Disconnect"), ("Включить", "Turn on"),
+                    ("Выйти", "Quit"), ("осталось ", "left: "), (" дн.", " d"), (" ч ", " h "), (" мин", " min"),
+                    ("МБ/с", "MB/s"), ("КБ/с", "KB/s"), ("Б/с", "B/s"), ("МБ", "MB"), ("КБ", "KB"), (" Б", " B")] {
+        t = t.replace(ru, e);
+    }
+    t
 }
 
 fn fmt_rate(bps: f64) -> String {
@@ -753,10 +769,11 @@ fn fmt_rate(bps: f64) -> String {
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-    let status = MenuItem::with_id(app, "status", "Не подключено", false, None::<&str>)?;
-    let open = MenuItem::with_id(app, "open", "Открыть INSELLERS VPN", true, None::<&str>)?;
-    let toggle = MenuItem::with_id(app, "toggle", "Включить", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Выйти", true, None::<&str>)?;
+    let en0 = pref("lang_en");
+    let status = MenuItem::with_id(app, "status", l10n(en0, "Не подключено"), false, None::<&str>)?;
+    let open = MenuItem::with_id(app, "open", l10n(en0, "Открыть INSELLERS VPN"), true, None::<&str>)?;
+    let toggle = MenuItem::with_id(app, "toggle", l10n(en0, "Включить"), true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", l10n(en0, "Выйти"), true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&status, &PredefinedMenuItem::separator(app)?, &open, &toggle, &PredefinedMenuItem::separator(app)?, &quit])?;
     let mut tb = TrayIconBuilder::with_id("main")
         .tooltip("INSELLERS VPN")
@@ -777,7 +794,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         });
     if let Some(icon) = app.default_window_icon() { tb = tb.icon(icon.clone()); }
     let tray = tb.build(app)?;
-    app.manage(TrayItems { status: status.clone(), toggle: toggle.clone() });
+    app.manage(TrayItems { status: status.clone(), toggle: toggle.clone(), open: open.clone(), quit: quit.clone() });
 
     // раз в 2 с — статус и скорость сети
     let h = app.handle().clone();
@@ -813,20 +830,23 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             if on { session_bytes = session_bytes.saturating_add(rx + tx); telemetry::tick(rx, tx); } else { session_bytes = 0; }
             if let Some(w) = h.get_webview_window("main") { let _ = w.eval(&format!("window.__INS_BYTES={session_bytes}")); }
             let (down, up) = (fmt_rate(rx as f64 / 2.0), fmt_rate(tx as f64 / 2.0));
+            let en = pref("lang_en");
             if let Some(items) = h.try_state::<TrayItems>() {
                 let al = access_left_text();
                 let st = if on { if al.is_empty() { format!("Подключено · ↓ {down}  ↑ {up}") } else { format!("Подключено · {al} · ↓ {down}  ↑ {up}") } }
                          else { "Не подключено".to_string() };
-                let _ = items.status.set_text(if upd_ready { format!("⬆ Вышло обновление! · {st}") } else { st });
-                let _ = items.toggle.set_text(if on { "Отключить" } else { "Включить" });
+                let _ = items.status.set_text(l10n(en, &if upd_ready { format!("⬆ Вышло обновление! · {st}") } else { st }));
+                let _ = items.toggle.set_text(l10n(en, if on { "Отключить" } else { "Включить" }));
+                let _ = items.open.set_text(l10n(en, "Открыть INSELLERS VPN"));
+                let _ = items.quit.set_text(l10n(en, "Выйти"));
             }
             let al = access_left_text();
-            let _ = tray.set_tooltip(Some(if on { format!("INSELLERS VPN - защищено{}\n↓ {down}   ↑ {up}", if al.is_empty() { String::new() } else { format!(" · {al}") }) }
-                                         else { "INSELLERS VPN - не подключено".to_string() }));
+            let _ = tray.set_tooltip(Some(l10n(en, &if on { format!("INSELLERS VPN - защищено{}\n↓ {down}   ↑ {up}", if al.is_empty() { String::new() } else { format!(" · {al}") }) }
+                                         else { "INSELLERS VPN - не подключено".to_string() })));
             #[cfg(target_os = "macos")]
             {
                 // 28.09 (владелец): в строке меню без «/с» - короче, значок не уходит за вырез экрана
-                let t = if on { format!("↓{} ↑{}", down.trim_end_matches("/с"), up.trim_end_matches("/с")) } else { String::new() };
+                let t = if on { l10n(en, &format!("↓{} ↑{}", down.trim_end_matches("/с"), up.trim_end_matches("/с"))) } else { String::new() };
                 let t = if upd_ready { format!("⬆ {t}").trim().to_string() } else { t };
                 let _ = tray.set_title(if t.is_empty() { None } else { Some(t) });
             }
