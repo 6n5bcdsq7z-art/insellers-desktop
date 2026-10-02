@@ -90,7 +90,7 @@ pub fn guest_until() -> u64 { guest_load().map(|(_, u)| u).unwrap_or(0) }
 
 /// Настройки поведения на этом компьютере (prefs.json рядом с данными приложения).
 pub fn prefs() -> serde_json::Value {
-    let mut v = serde_json::json!({"autoconnect": true, "reconnect": true, "killswitch": false, "theme_light": false});
+    let mut v = serde_json::json!({"autoconnect": true, "reconnect": true, "killswitch": false, "theme_light": false, "lang_en": false});
     if let Some(p) = data_path("prefs.json") {
         if let Ok(t) = std::fs::read_to_string(p) {
             if let Ok(serde_json::Value::Object(m)) = serde_json::from_str::<serde_json::Value>(&t) {
@@ -508,6 +508,7 @@ fn init_script(token: &str, version: &str) -> String {
     connect: function () {{ inv("vpn_connect"); }},
     disconnect: function () {{ inv("vpn_disconnect"); }},
     setTheme: function (t) {{ inv("set_theme", {{ theme: String(t) }}); }},
+    setLang: function (l) {{ inv("set_lang", {{ lang: String(l) }}); }},
     hasVpn: function () {{ return true; }},
     hasAwg: function () {{ return true; }},
     connectGuest: function (u, t) {{ inv("vpn_guest", {{ url: String(u), until: String(t) }}); }},
@@ -623,6 +624,8 @@ fn build_main(app: &AppHandle) -> tauri::Result<()> {
         .background_color(theme_bg(pref("theme_light")))
         // 02.10: заставка (локальная страница) - в теме, которую человек выбрал на странице
         .initialization_script(if pref("theme_light") { "if(location.host!==\"vpn.insellers.su\")document.documentElement.setAttribute(\"data-theme\",\"light\");" } else { "" })
+        // 02.10: язык заставки - как выбран на странице
+        .initialization_script(if pref("lang_en") { "window.__INS_LANG_EN=1;" } else { "" })
         .inner_size(430.0, 880.0)
         .min_inner_size(380.0, 700.0)
         .resizable(true)
@@ -855,6 +858,12 @@ async fn native_cmd(app: AppHandle, cmd: &str, arg: serde_json::Value) {
         "vpn_disconnect" => vpn_disconnect(app),
         "set_pref" => set_pref(&app, arg["key"].as_str().unwrap_or_default(), arg["value"].as_bool().unwrap_or(false)),
         // 02.10 (владелец): тема страницы - фон окна и заставка под неё (запоминается в prefs.json)
+        // 02.10 (владелец): язык страницы - заставка на нём при следующем запуске (prefs.json)
+        "set_lang" => {
+            let en = arg["lang"].as_str() == Some("en");
+            let mut v = prefs(); v["lang_en"] = serde_json::Value::Bool(en);
+            if let Some(p) = data_path("prefs.json") { write_private(&p, &v.to_string()); }
+        }
         "set_theme" => {
             let light = arg["theme"].as_str() == Some("light");
             let mut v = prefs(); v["theme_light"] = serde_json::Value::Bool(light);
