@@ -524,11 +524,15 @@ async fn get_via(port: u16, url: &str, max: usize, secs: u64) -> (u64, usize, St
     let err = match c.get(url).send().await {
         Ok(mut r) => {
             let st = r.status();
-            loop {
-                match r.chunk().await {
-                    Ok(Some(b)) => { got += b.len(); if got >= max { break String::new(); } }
-                    Ok(None) => break if st.is_success() { String::new() } else { format!("http {}", st.as_u16()) },
-                    Err(e) => break e.to_string().chars().take(120).collect(),
+            if !st.is_success() {
+                format!("http {}", st.as_u16())
+            } else {
+                loop {
+                    match r.chunk().await {
+                        Ok(Some(b)) => { got += b.len(); if got >= max { break String::new(); } }
+                        Ok(None) => break String::new(),
+                        Err(e) => break e.to_string().chars().take(120).collect(),
+                    }
                 }
             }
         }
@@ -574,7 +578,11 @@ pub async fn run_variants(app: &tauri::AppHandle, dir: &std::path::Path, token: 
         let p = v["port"].as_u64().unwrap_or(0) as u16;
         let (hs, _, e1) = get_via(p, &lat, 1024, 10).await;
         if !e1.is_empty() { out.push(json!({"id": id, "ok": false, "err": e1, "hs_ms": hs})); continue; }
-        let (rtt, _, _) = get_via(p, &lat, 1024, 10).await;
+        let (rtt, _, e2) = get_via(p, &lat, 1024, 10).await;
+        if !e2.is_empty() {
+            out.push(json!({"id": id, "ok": false, "err": e2, "hs_ms": hs, "rtt_ms": rtt}));
+            continue;
+        }
         let (ms, got, e3) = get_via(p, &big, want, 15).await;
         let ok = e3.is_empty() && got >= want;
         let mut r = json!({"id": id, "ok": ok, "hs_ms": hs, "rtt_ms": rtt, "ms": ms, "kb": ((got as f64) / 102.4).round() / 10.0});
