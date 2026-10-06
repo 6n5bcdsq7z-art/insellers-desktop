@@ -471,22 +471,23 @@ fn access_left_text() -> String {
 }
 
 /// Мост для страницы: те же методы, что у Android (window.InsellersNative).
-fn init_script(token: &str, version: &str) -> String {
+fn init_script(token: &str, version: &str, bridge_nonce: &str) -> String {
     let tok = serde_json::to_string(token).unwrap_or_else(|_| "\"\"".into());
     let ver = serde_json::to_string(version).unwrap_or_else(|_| "\"\"".into());
     let prefs_js = prefs().to_string();
     let hw = serde_json::to_string(&format!("ins-{}", install_id())).unwrap_or_default();
     let model = serde_json::to_string(&host_model()).unwrap_or_default();
     let guest = guest_until();
+    let nonce_js = serde_json::to_string(bridge_nonce).unwrap_or_else(|_| "\"\"".into());
     format!(r#"
 (function () {{
-  if (location.host !== "{HOST}") return;
+  if (location.origin !== "https://{HOST}") return;
   window.__INS_PREFS = {prefs_js};
   window.__INS_GUEST_UNTIL = {guest};
   // Канал страница → приложение: переход на /__native/<команда>. Приложение перехватывает его
   // в on_navigation и отменяет — страница остаётся на месте. Не зависит от IPC Tauri для удалённых сайтов.
   var inv = function (cmd, args) {{
-    try {{ location.href = "/__native/" + cmd + "?a=" + encodeURIComponent(JSON.stringify(args || {{}})); }} catch (e) {{}}
+    try {{ location.href = "/__native/" + cmd + "?n=" + {nonce_js} + "&a=" + encodeURIComponent(JSON.stringify(args || {{}})); }} catch (e) {{}}
   }};
   window.InsellersNative = {{
     isApp: function () {{ return true; }},
@@ -599,7 +600,24 @@ fn theme_bg(light: bool) -> tauri::window::Color {
     if light { tauri::window::Color(0xfa, 0xf7, 0xf2, 255) } else { tauri::window::Color(0, 0, 0, 255) }
 }
 
+// A foreign iframe may navigate to our URL. Destination host alone is not authorization.
+fn native_request_nonce_ok(u: &url::Url, nonce: &str) -> bool {
+    if nonce.len() != 64 || u.scheme() != "https" || u.host_str() != Some(HOST)
+        || u.port_or_known_default() != Some(443) || !u.path().starts_with("/__native/") { return false; }
+    let mut values = u.query_pairs().filter(|(k, _)| k == "n");
+    let first = values.next();
+    first.map(|(_, v)| v == nonce).unwrap_or(false) && values.next().is_none()
+}
+
+fn new_bridge_nonce() -> std::io::Result<String> {
+    let mut bytes = [0u8; 32];
+    rustls::crypto::ring::default_provider().secure_random.fill(&mut bytes)
+        .map_err(|_| std::io::Error::other("native bridge random unavailable"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 fn build_main(app: &AppHandle) -> tauri::Result<()> {
+    let bridge_nonce = new_bridge_nonce()?;
     if let Some(w) = app.get_webview_window("main") { let _ = w.destroy(); }
     let token = load_token();
     let version = app.package_info().version.to_string();
@@ -629,7 +647,7 @@ fn build_main(app: &AppHandle) -> tauri::Result<()> {
         .inner_size(430.0, 880.0)
         .min_inner_size(380.0, 700.0)
         .resizable(true)
-        .initialization_script(&init_script(&token, &version))
+        .initialization_script(&init_script(&token, &version, &bridge_nonce))
         .initialization_script(&format!("window.__INS_V = {};", serde_json::to_string(&version).unwrap_or_default()))
         // 26.09: после перезагрузки страницы (обновление веб-части, заставка → сайт) она не знала, что VPN уже включён
         // (состояние приходит только событиями) - и её «автоподключение» перезапускало рабочее подключение
@@ -665,6 +683,7 @@ fn build_main(app: &AppHandle) -> tauri::Result<()> {
             // своя локальная заставка (macOS/Linux: tauri://localhost, Windows: http(s)://tauri.localhost)
             if u.scheme() == "tauri" || u.host_str() == Some("tauri.localhost") { return true; }
             if u.scheme() == "https" && u.host_str() == Some(HOST) && u.path().starts_with("/__native/") {
+                if !native_request_nonce_ok(u, &bridge_nonce) { return false; }
                 let cmd = u.path().trim_start_matches("/__native/").to_string();
                 let arg: serde_json::Value = u.query_pairs().find(|(k, _)| k == "a")
                     .and_then(|(_, v)| serde_json::from_str(&v).ok()).unwrap_or_default();
