@@ -963,15 +963,13 @@ fn kill_child(app: &AppHandle) {
 /// 403 на скрипт (журнал: banner.nofill why=script), Kadam/OnClickA/HilltopAds - «нет рекламы»; без VPN на том же Mac - показ.
 /// gigapub.tech здесь НЕТ: его хосты на Hetzner (в РФ заблокирован) - остаётся в туннеле.
 const AD_DIRECT: &[&str] = &[
-    // 30.09: Adcash (нижний баннер) - по имени; адреса Cloudflare по IP не берём
-    "acscdn.com", "youradexchange.com",
     // 30.09 14:50: MyBid (баннер) - скрипт/ставки/креативы (AS39572); mbdippex/rtbrenab/zivroq на Hetzner - через туннель
     "mbidadm.com", "mbidtg.com", "cabnnr.com",
     // 30.09 15:10: AdsBitvex (ролики) - Cloudflare, только по имени
     "adsbitvex.com",
-    // 30.09 17:00: то, что было только в ad-extra.json (Adcash, HilltopAds), и новые хосты показа: Adsterra Native
+    // 30.09 17:00: то, что было только в ad-extra.json (HilltopAds), и новые хосты показа: Adsterra Native
     // (profitableratecpmnetwork.com), ролик MyBid (xml.galaxypush.com, adskeeper.com - Cloudflare, по имени), Kadam (viipqnqi.com)
-    "adexchangerapid.com", "usrpubtrk.com", "quizzical-topic.com",
+    "quizzical-topic.com",
     "profitableratecpmnetwork.com", "galaxypush.com", "adskeeper.com", "viipqnqi.com",
     // 30.09 17:40: EVADAV Native - скрипт curoax.com, реклама blolma.com
     "curoax.com", "blolma.com",
