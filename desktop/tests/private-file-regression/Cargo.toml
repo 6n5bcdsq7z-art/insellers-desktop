@@ -1,0 +1,10 @@
+[package]
+name = "insellers-private-file-regression"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+tempfile = "=3.23.0"
+
+[lib]
+path = "lib.rs"

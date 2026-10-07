@@ -10,6 +10,8 @@ mod probe;
 mod tun;
 mod upd;
 mod telemetry;
+mod private_file;
+use private_file::write_private;
 
 use std::time::Duration;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -36,13 +38,6 @@ fn data_path(name: &str) -> Option<std::path::PathBuf> {
     }?;
     let _ = std::fs::create_dir_all(&base);
     Some(base.join(name))
-}
-
-fn write_private(p: &std::path::Path, v: &str) -> bool {
-    if std::fs::write(p, v).is_err() { return false; }
-    #[cfg(unix)]
-    { use std::os::unix::fs::PermissionsExt; let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600)); }
-    true
 }
 
 /// Токен: системное хранилище паролей, а если оно недоступно (неподписанное приложение на macOS) — файл 0600.
