@@ -26,3 +26,16 @@ The probe harness uses local fixture sockets; no live user connections are
 changed. The bridge fixture contains synthetic credentials. Private-file tests
 write only temporary files. Linux tests do not replace Windows/macOS builds,
 WebView/device tests, signed release checks or validation of Windows ACLs.
+
+With Playwright and Chromium installed, use the actual Rust-generated bridge
+fixture above for browser-frame checks:
+
+```bash
+CHROME_BIN=/usr/bin/chromium node tests/test_native_frame_bootstrap.cjs desktop /tmp/insellers-bridge-fixture.js
+```
+
+The Desktop workflow pins Playwright 1.62.1. The generated bridge runs only in a
+trusted top document, including when injection targets an opaque same-location
+iframe. Same-origin children still have access to their parent: preventing direct
+injection is a prerequisite, not full advertisement isolation. All responses and
+credentials in this check are synthetic; no production/vendor request is sent.

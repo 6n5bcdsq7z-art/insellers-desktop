@@ -476,7 +476,8 @@ fn init_script(token: &str, version: &str, bridge_nonce: &str) -> String {
     let nonce_js = serde_json::to_string(bridge_nonce).unwrap_or_else(|_| "\"\"".into());
     format!(r#"
 (function () {{
-  if (location.origin !== "https://{HOST}") return;
+  // URL origin alone also matches an opaque sandboxed child with our wrapper URL.
+  if (window.top !== window.self || location.origin !== "https://{HOST}") return;
   window.__INS_PREFS = {prefs_js};
   window.__INS_GUEST_UNTIL = {guest};
   // Канал страница → приложение: переход на /__native/<команда>. Приложение перехватывает его
