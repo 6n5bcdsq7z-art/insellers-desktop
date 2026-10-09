@@ -1,5 +1,5 @@
 
-> insellers-market@1.0.8 dist
+> insellers-market@1.0.9 dist
 > electron-builder --win --x64 --publish never
 
   • electron-builder  version=26.15.3 os=10.0.26100
@@ -14,11 +14,11 @@
   • updating asar integrity executable resource  executablePath=dist\win-unpacked\INSELLERS.exe
   • downloaded      label=icons-bundle.tar.gz progress=100%
   • signing with signtool.exe  path=dist\win-unpacked\INSELLERS.exe
-  • building        target=nsis file=dist\INSELLERS-1.0.8-win-x64.exe archs=x64 oneClick=false perMachine=false
+  • building        target=nsis file=dist\INSELLERS-1.0.9-win-x64.exe archs=x64 oneClick=false perMachine=false
   • downloaded      label=nsis-3.0.4.1.7z progress=100%
   • downloaded      label=7zip-win-x64.tar.gz progress=100%
   • signing with signtool.exe  path=dist\win-unpacked\resources\elevate.exe
   • downloaded      label=nsis-resources-3.4.1.7z progress=100%
-  • signing with signtool.exe  path=dist\INSELLERS-1.0.8-win-x64.__uninstaller.exe
-  • signing with signtool.exe  path=dist\INSELLERS-1.0.8-win-x64.exe
-  • building block map  blockMapFile=dist\INSELLERS-1.0.8-win-x64.exe.blockmap
+  • signing with signtool.exe  path=dist\INSELLERS-1.0.9-win-x64.__uninstaller.exe
+  • signing with signtool.exe  path=dist\INSELLERS-1.0.9-win-x64.exe
+  • building block map  blockMapFile=dist\INSELLERS-1.0.9-win-x64.exe.blockmap
