@@ -20,6 +20,7 @@ public class MainActivity extends Activity {
     private static final String ENTRY = "https://bot.insellers.su/?app=android";
     private static final int FILE_REQUEST = 31;
     private WebView web;
+    private AppUpdates updates;
     private ValueCallback<Uri[]> fileCallback;
 
     private boolean internal(Uri uri) {
@@ -35,6 +36,8 @@ public class MainActivity extends Activity {
     }
     @Override public void onCreate(Bundle savedState) {
         super.onCreate(savedState);
+        updates = new AppUpdates(this);
+        updates.check(false);
         web = new WebView(this); setContentView(web);
         web.setOnApplyWindowInsetsListener((v, insets) -> {
             if (android.os.Build.VERSION.SDK_INT >= 30) {
@@ -93,11 +96,16 @@ public class MainActivity extends Activity {
             fileCallback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(result, data)); fileCallback = null;
         }
     }
-    @Override protected void onPause() { CookieManager.getInstance().flush(); super.onPause(); }
+    @Override public boolean onCreateOptionsMenu(android.view.Menu menu) {
+        menu.add("Проверить обновления").setOnMenuItemClickListener(item -> { updates.check(true); return true; });
+        return true;
+    }
+    @Override protected void onResume() { super.onResume(); if (updates != null) updates.foreground(); }
+    @Override protected void onPause() { updates.background(); CookieManager.getInstance().flush(); super.onPause(); }
     @Override protected void onSaveInstanceState(Bundle out) { web.saveState(out); super.onSaveInstanceState(out); }
     @Override public void onBackPressed() { if (web.canGoBack()) web.goBack(); else super.onBackPressed(); }
     @Override protected void onDestroy() {
         if (fileCallback != null) fileCallback.onReceiveValue(null);
-        web.destroy(); super.onDestroy();
+        updates.close(); web.destroy(); super.onDestroy();
     }
 }

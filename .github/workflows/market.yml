@@ -37,13 +37,20 @@ jobs:
       - name: Build installers
         run: npm run dist -- ${{ matrix.target }} --publish never
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          CSC_LINK: ${{ runner.os == 'macOS' && secrets.MARKET_MAC_CSC_LINK || secrets.MARKET_WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MARKET_MAC_CSC_KEY_PASSWORD || secrets.MARKET_WIN_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.MARKET_APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.MARKET_APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.MARKET_APPLE_TEAM_ID }}
       - uses: actions/upload-artifact@v4
         with:
           name: market-${{ matrix.os }}
           path: |
             market/apps/desktop/dist/*.exe
             market/apps/desktop/dist/*.dmg
+            market/apps/desktop/dist/*.zip
+            market/apps/desktop/dist/*.yml
+            market/apps/desktop/dist/*.blockmap
           if-no-files-found: error
   android:
     permissions:
@@ -97,10 +104,12 @@ jobs:
           else
             cp app/build/outputs/apk/debug/app-debug.apk out/INSELLERS-android-test.apk
           fi
+      - name: Android update feed
+        run: python ../../scripts/android_feed.py out/*.apk
       - uses: actions/upload-artifact@v4
         with:
           name: market-android
-          path: market/apps/android/out/*.apk
+          path: market/apps/android/out/*
           if-no-files-found: error
       - name: Save build diagnostics
         if: always()
@@ -136,15 +145,17 @@ jobs:
         run: |
           set -euo pipefail
           cd installers
-          sha256sum *.exe *.dmg *.apk > SHA256SUMS.txt
+          sha256sum *.exe *.dmg *.apk *.zip *.yml *.json *.blockmap > SHA256SUMS.txt
           cat > release-notes.txt <<'NOTES'
           INSELLERS — поставщики, товары и заявки. Android, Windows и macOS (Apple Silicon / Intel).
 
           Интерфейс и данные общие с Telegram mini-app; изменения сервера приходят без переустановки.
           Вход: начните вход в приложении, откройте ссылку Telegram, сверьте код, подтвердите и вернитесь.
 
-          Первый выпуск для проверки: Windows/macOS пока без подписи разработчика и нотарификации Apple.
+          Обновления: проверка при запуске и кнопка «Проверить обновления», загрузка пакета и установка. Windows: обновлятор приложения. Mac: ZIP для обновлятора, требуется подпись Apple. Android: проверка SHA-256 и совпадения ключа подписи перед системной установкой.
+
+          Выпуск для проверки: Windows/macOS пока без подписи разработчика и нотарификации Apple.
           Файл android-test.apk — тестовая сборка. Для стабильных Android-обновлений требуется постоянный ключ подписи; тестовая сборка не предназначена для массового распространения.
           NOTES
-          gh release create "market-${GITHUB_RUN_NUMBER}-${GITHUB_SHA:0:7}" *.exe *.dmg *.apk SHA256SUMS.txt \
+          gh release create "market-${GITHUB_RUN_NUMBER}-${GITHUB_SHA:0:7}" *.exe *.dmg *.apk *.zip *.yml *.json *.blockmap SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "INSELLERS — приложения (${GITHUB_SHA:0:7})" --notes-file release-notes.txt

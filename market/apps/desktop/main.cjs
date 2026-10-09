@@ -1,7 +1,10 @@
 'use strict';
-const { app, BrowserWindow, shell, Menu } = require('electron');
+const { app, BrowserWindow, shell, Menu, dialog } = require('electron');
 const { ORIGIN, isInternal, isExternal } = require('./policy.cjs');
 const path = require('node:path');
+const { autoUpdater } = require('electron-updater');
+const { createUpdates } = require('./updates.cjs');
+const updates = createUpdates({ updater: autoUpdater, dialog, app, getWindow: () => window });
 let window;
 const entry = ORIGIN + '/?app=desktop';
 function openExternal(url) { if (isExternal(url)) shell.openExternal(url).catch(() => {}); }
@@ -31,7 +34,8 @@ function createWindow() {
   window.loadURL(entry);
   const menu = [{ label: 'INSELLERS', submenu: [
     { label: 'Обновить страницу', accelerator: 'CmdOrCtrl+R', click: () => window.loadURL(entry) },
-    { label: 'Загрузить новую версию приложения', click: () => openExternal('https://github.com/6n5bcdsq7z-art/insellers-desktop/releases/latest') },
+    { label: 'Проверить обновления', click: () => void updates.check(true) },
+    { label: 'Скачать установщик', click: () => openExternal('https://github.com/6n5bcdsq7z-art/insellers-desktop/releases/latest') },
     { type: 'separator' }, { role: 'quit', label: 'Выйти' }
   ] }, { role: 'editMenu' }];
   if (process.platform === 'darwin') menu.push({ role: 'windowMenu' });
@@ -40,7 +44,7 @@ function createWindow() {
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => { if (window) { if (window.isMinimized()) window.restore(); window.focus(); } });
-  app.whenReady().then(createWindow);
+  app.whenReady().then(() => { createWindow(); updates.start(); });
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 }

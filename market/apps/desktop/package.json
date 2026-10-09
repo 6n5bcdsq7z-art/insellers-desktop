@@ -2,7 +2,7 @@
   "name": "insellers-market",
   "productName": "INSELLERS",
   "version": "1.0.0",
-  "description": "\u041f\u043e\u0441\u0442\u0430\u0432\u0449\u0438\u043a\u0438, \u0442\u043e\u0432\u0430\u0440\u044b \u0438 \u0437\u0430\u044f\u0432\u043a\u0438 INSELLERS",
+  "description": "Поставщики, товары и заявки INSELLERS",
   "author": "INSELLERS",
   "private": true,
   "main": "main.cjs",
@@ -23,7 +23,8 @@
       "main.cjs",
       "policy.cjs",
       "offline.html",
-      "package.json"
+      "package.json",
+      "updates.cjs"
     ],
     "directories": {
       "output": "dist",
@@ -35,6 +36,13 @@
       "target": [
         {
           "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
           "arch": [
             "arm64",
             "x64"
@@ -64,11 +72,20 @@
         "AppImage"
       ],
       "category": "Office"
-    }
+    },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://github.com/6n5bcdsq7z-art/insellers-desktop/releases/latest/download"
+      }
+    ]
   },
   "repository": {
     "type": "git",
     "url": "https://github.com/6n5bcdsq7z-art/insellers-desktop.git",
     "directory": "market/apps/desktop"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.9"
   }
 }
