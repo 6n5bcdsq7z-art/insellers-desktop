@@ -1,0 +1,2 @@
+# Cryptographic test input must remain byte-for-byte identical on Windows checkouts.
+market/apps/desktop/tests/fixtures/tauri-package.bin -text

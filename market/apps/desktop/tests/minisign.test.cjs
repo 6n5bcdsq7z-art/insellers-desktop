@@ -18,3 +18,9 @@ test('choose matching Mac architecture and reject downgrade or foreign update lo
  assert.throws(()=>validateMacFeed(feed(),'x64','1.0.8'));
  const f=feed();f.files.arm64.url='https://evil.test/INSELLERS-1.0.9-mac-arm64.zip';assert.throws(()=>validateMacFeed(f,'arm64','1.0.8'));
 });
+const {verifyPackage}=require('../package-verify.cjs');
+test('verification worker accepts real signed fixture and rejects corrupted metadata',async()=>{
+ const info={sha256:require('node:crypto').createHash('sha256').update(data).digest('hex'),signature,version:'1.0.9'};
+ await verifyPackage(path.join(base,'tauri-package.bin'),info,key);
+ await assert.rejects(verifyPackage(path.join(base,'tauri-package.bin'),{...info,sha256:'a'.repeat(64)},key),/hash/);
+});

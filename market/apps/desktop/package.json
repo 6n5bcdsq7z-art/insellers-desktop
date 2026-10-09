@@ -27,7 +27,8 @@
       "package.json",
       "updates.cjs",
       "mac-updates.cjs",
-      "minisign.cjs"
+      "minisign.cjs",
+      "package-verify.cjs"
     ],
     "directories": {
       "output": "dist",
