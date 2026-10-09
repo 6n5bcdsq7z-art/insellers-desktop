@@ -1,22 +1,12 @@
 Loading package information...                                                  Loading local repository...                                                     [                                       ] 3% Loading local repository...        [                                       ] 3% Fetch remote repository...         [=                                      ] 3% Fetch remote repository...         [=                                      ] 4% Fetch remote repository...         [=                                      ] 5% Fetch remote repository...         [==                                     ] 5% Fetch remote repository...         [==                                     ] 6% Fetch remote repository...         [==                                     ] 7% Fetch remote repository...         [==                                     ] 7% Computing updates...               [===                                    ] 8% Computing updates...               [===                                    ] 10% Computing updates...              [=======================================] 100% Computing updates...             
 
-
-Welcome to Gradle 8.13!
-
-Here are the highlights of this release:
- - Daemon JVM auto-provisioning
- - Enhancements for Scala plugin and JUnit testing
- - Improvements for build authors and plugin developers
-
-For more details see https://docs.gradle.org/8.13/release-notes.html
-
 To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.13/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
 Daemon will be stopped at the end of the build 
 > Task :app:preBuild UP-TO-DATE
 > Task :app:preDebugBuild UP-TO-DATE
 > Task :app:mergeDebugNativeDebugMetadata NO-SOURCE
-> Task :app:checkDebugAarMetadata
 > Task :app:javaPreCompileDebug
+> Task :app:checkDebugAarMetadata
 > Task :app:generateDebugResValues
 > Task :app:mapDebugSourceSetPaths
 > Task :app:generateDebugResources
@@ -46,7 +36,7 @@ Daemon will be stopped at the end of the build
 > Task :app:validateSigningDebug
 
 > Task :app:compileDebugJavaWithJavac
-Note: /home/runner/work/insellers-desktop/insellers-desktop/market/apps/android/app/src/main/java/su/insellers/market/MainActivity.java uses or overrides a deprecated API.
+Note: Some input files use or override a deprecated API.
 Note: Recompile with -Xlint:deprecation for details.
 
 > Task :app:dexBuilderDebug
@@ -59,8 +49,8 @@ Note: Recompile with -Xlint:deprecation for details.
 > Task :app:stripReleaseDebugSymbols NO-SOURCE
 > Task :app:extractReleaseNativeSymbolTables NO-SOURCE
 > Task :app:mergeReleaseNativeDebugMetadata NO-SOURCE
-> Task :app:mergeProjectDexDebug
 > Task :app:checkReleaseDuplicateClasses
+> Task :app:mergeProjectDexDebug
 > Task :app:javaPreCompileRelease
 > Task :app:checkReleaseAarMetadata
 > Task :app:generateReleaseResValues
@@ -104,16 +94,16 @@ Note: Recompile with -Xlint:deprecation for details.
 > Task :app:processReleaseResources
 
 > Task :app:compileReleaseJavaWithJavac
-Note: /home/runner/work/insellers-desktop/insellers-desktop/market/apps/android/app/src/main/java/su/insellers/market/MainActivity.java uses or overrides a deprecated API.
+Note: Some input files use or override a deprecated API.
 Note: Recompile with -Xlint:deprecation for details.
 
+> Task :app:lintAnalyzeDebug
 > Task :app:dexBuilderRelease
 > Task :app:mergeDexRelease
 > Task :app:mergeReleaseGlobalSynthetics
 > Task :app:compileReleaseArtProfile
 > Task :app:generateReleaseLintVitalReportModel
 > Task :app:optimizeReleaseResources
-> Task :app:lintAnalyzeDebug
 > Task :app:lintVitalAnalyzeRelease
 > Task :app:lintVitalReportRelease SKIPPED
 > Task :app:lintVitalRelease SKIPPED
@@ -128,7 +118,7 @@ Wrote HTML report to file:///home/runner/work/insellers-desktop/insellers-deskto
 
 > Task :app:lintDebug
 > Task :app:lint
-gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run_2-1791568213581.json
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run_2-1791569156296.json
 
 [Incubating] Problems report is available at: file:///home/runner/work/insellers-desktop/insellers-desktop/market/apps/android/build/reports/problems/problems-report.html
 
@@ -138,5 +128,5 @@ You can use '--warning-mode all' to show the individual deprecation warnings and
 
 For more on this, please refer to https://docs.gradle.org/8.13/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
 
-BUILD SUCCESSFUL in 1m 2s
+BUILD SUCCESSFUL in 27s
 82 actionable tasks: 82 executed
