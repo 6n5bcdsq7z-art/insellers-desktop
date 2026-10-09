@@ -854,27 +854,52 @@ fn single_from(c: &Value, main: &Value) -> Value {
     c
 }
 
+/// Retry only transient delivery failures; never bypass an account/device denial.
+fn subscription_mirror(url: &str) -> Option<String> {
+    url.strip_prefix("https://direct.insellers.su/").map(|p| format!("https://n2.insellers.su/{p}"))
+}
+async fn subscription_text(client: &reqwest::Client, url: &str) -> Result<(String, bool), String> {
+    let mut urls = vec![url.to_string()];
+    if let Some(alt) = subscription_mirror(url) { urls.push(alt); }
+    subscription_endpoints(client, urls).await
+}
+async fn subscription_endpoints(client: &reqwest::Client, urls: Vec<String>) -> Result<(String, bool), String> {
+    for endpoint in urls {
+        let response = match client.get(&endpoint).timeout(Duration::from_secs(8)).send().await {
+            Ok(r) => r, Err(_) => continue,
+        };
+        let status = response.status();
+        if status.is_server_error() || status.as_u16() == 408 || status.as_u16() == 429 { continue; }
+        if !status.is_success() { return Err(format!("Сервер отклонил выдачу конфигурации (HTTP {})", status.as_u16())); }
+        let manual_bad = response.headers().get("x-ins-manual").and_then(|v| v.to_str().ok()) == Some("bad");
+        if let Ok(text) = response.text().await { return Ok((text, manual_bad)); }
+    }
+    Err("SUB_UNAVAILABLE".into())
+}
+
 /// Кандидаты для подключения: сначала выбор человека (или «Автовыбор» сервера), потом каждый путь по одному
 /// в порядке сервера (TCP-пути, hy2 - последним). Пути, упавшие за последние 30 минут, - в конец. Не больше 5.
 async fn xray_candidates(app: &AppHandle, client: &reqwest::Client, url: &str, offline: bool, choice: &str,
                          dir: &PathBuf, last: &PathBuf) -> Result<Vec<(String, Value)>, String> {
+    notify(app, "connecting", if offline { "Читаем сохранённую конфигурацию…" } else { "Получаем конфигурацию VPN…" });
     let mut raw_cands: Vec<Value> = Vec::new();
     // 29.09: свежая подписка, забранная через туннель (см. h_refresh), - вместо старой сохранённой конфигурации, до 2 ч
     let fresh = dir.join("sub.fresh.json");
     let fresh_ok = std::fs::metadata(&fresh).ok().and_then(|m| m.modified().ok())
         .map(|t| t.elapsed().map(|e| e.as_secs() < 2 * 3600).unwrap_or(false)).unwrap_or(false);
     let fetched = if offline { if fresh_ok { std::fs::read_to_string(&fresh).ok() } else { None } } else {
-        match client.get(url).send().await {
+        match subscription_text(client, url).await {
             // 27.09 (владелец): сервер (центр диагностики) видит, что ручной протокол у провайдера человека виснет (>= 50%) -
             // сразу «Автовыбор» на 15 мин с объяснением; через 15 мин - снова спросим сервер (путь ожил - вернётся выбор)
-            Ok(r) if manual_choice(choice) && r.headers().get("x-ins-manual").and_then(|v| v.to_str().ok()) == Some("bad") => {
+            Ok((_, true)) if manual_choice(choice) => {
                 TEMP_AUTO_UNTIL.store(crate::now_ms() + 15 * 60 * 1000, std::sync::atomic::Ordering::SeqCst);
                 crate::remote_log("vpn.manual_bad", json!({"manual": manual_name(choice)}));
                 return Err(format!("RETRY_AUTO_BAD:{}", manual_name(choice)));
             }
-            Ok(r) => Some(r.text().await.map_err(|e| e.to_string())?),
-            Err(_) if fresh_last(last) => None,           // сервер подписок не ответил - сохранённая конфигурация
-            Err(_) => return Err("Сервер подписок недоступен".to_string()),
+            Ok((text, _)) => Some(text),
+            Err(e) if e == "SUB_UNAVAILABLE" && fresh_last(last) => None,
+            Err(e) if e == "SUB_UNAVAILABLE" => return Err("Не удалось получить конфигурацию через основной и резервный адрес. Проверьте сеть и повторите попытку".into()),
+            Err(e) => return Err(e),
         }
     };
     let mut prepared = true;
@@ -921,6 +946,7 @@ async fn xray_candidates(app: &AppHandle, client: &reqwest::Client, url: &str, o
 
 /// Запуск ядра (xray или wireproxy) + наблюдение за процессом: упал сам - переподключаемся или сообщаем.
 fn launch(app: &AppHandle, bin: &str, run_args: Vec<String>, dir: &PathBuf) -> Result<(), String> {
+    notify(app, "connecting", "Запускаем VPN-ядро…");
     let (mut rx, child) = app.shell().sidecar(bin).map_err(|e| e.to_string())?
         .env("XRAY_LOCATION_ASSET", dir.to_string_lossy().to_string())
         .args(run_args)
@@ -1304,6 +1330,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     // ещё не отошёл после закрытия другого VPN) - подключаемся по ней, а не пишем «Нет связи с сервером», пока Happ работает.
     let last = dir.join("config.last.json");
     // 1) ссылка на свою подписку (или гостевая - ограниченный режим до входа / пока подписки нет)
+    notify(&app, "connecting", "Запрашиваем настройки доступа…");
     let bootstrap_started = std::time::Instant::now();
     let (subscription, requested_choice) = if !token.is_empty() {
         let choice_client = client.clone(); let choice_token = token.clone();

@@ -16,7 +16,23 @@ const HTTP_PORT:u16=9;
 static PROBES:std::sync::Mutex<std::collections::VecDeque<(bool,u64,u64,String)>>=std::sync::Mutex::new(std::collections::VecDeque::new());
 async fn probe_real_t(_:&str,_:u64)->(bool,u64,u64,String){PROBES.lock().unwrap().pop_front().expect("unexpected extra probe")}
 include!(concat!(env!("OUT_DIR"),"/connection.rs"));
+include!(concat!(env!("OUT_DIR"),"/subscription.rs"));
+async fn serve_once(code:u16, body:&'static str)->String {
+ use tokio::io::{AsyncReadExt,AsyncWriteExt};
+ let l=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let addr=l.local_addr().unwrap();
+ tokio::spawn(async move {let(mut s,_)=l.accept().await.unwrap();let mut b=[0;4096];s.read(&mut b).await.unwrap();s.write_all(format!("HTTP/1.1 {code} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();});
+ format!("http://{addr}/sub/fixture")
+}
 #[tokio::main]async fn main(){
+ assert_eq!(subscription_mirror("https://direct.insellers.su/sub/key?auto=1"),Some("https://n2.insellers.su/sub/key?auto=1".into()));
+ assert_eq!(subscription_mirror("https://direct.insellers.su.evil/sub"),None);
+ let client=reqwest::Client::builder().no_proxy().build().unwrap();
+ let fail=serve_once(503,"temporary").await;let ok=serve_once(200,"fixture-config").await;
+ assert_eq!(subscription_endpoints(&client,vec![fail,ok]).await.unwrap(),("fixture-config".into(),false));
+ let denied=serve_once(403,"denied").await;
+ assert!(subscription_endpoints(&client,vec![denied,"invalid://must-not-request".into()]).await.unwrap_err().contains("403"));
+ assert_eq!(subscription_endpoints(&client,vec!["http://127.0.0.1:9".into()]).await.unwrap_err(),"SUB_UNAVAILABLE");
+ println!("PASS actual subscription: mirror/query, 503 fallback, 403 terminal, network failure");
  for (first,second,expected) in [("ok","timeout",false),("timeout","ok",false),("timeout","timeout",true),("http 502","timeout",false),("core","timeout",false)] {
  *PROBES.lock().unwrap()=[first,second].into_iter().map(|r|(r=="ok",0,0,r.into())).collect();assert_eq!(freeze_confirmed().await,expected);
  }
