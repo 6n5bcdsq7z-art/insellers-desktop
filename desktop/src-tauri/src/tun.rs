@@ -218,7 +218,8 @@ pub fn bypass_ips(cfg_text: &str) -> Vec<String> {
             }
         }
     }
-    let mut out: Vec<String> = Vec::new();
+    // Direct complaint delivery must survive a broken TUN, including DNS failure.
+    let mut out: Vec<String> = vec!["46.224.14.67".into(), "212.34.151.212".into()];
     for h in hosts {
         let ips: Vec<String> = if h.parse::<std::net::Ipv4Addr>().is_ok() { vec![h.clone()] } else {
             (h.as_str(), 443).to_socket_addrs().map(|it| it.filter(|a| a.is_ipv4()).map(|a| a.ip().to_string()).collect()).unwrap_or_default()

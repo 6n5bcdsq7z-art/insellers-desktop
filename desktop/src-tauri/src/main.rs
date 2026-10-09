@@ -11,6 +11,7 @@ mod tun;
 mod upd;
 mod telemetry;
 mod private_file;
+mod failure_reports;
 use private_file::write_private;
 
 use std::time::Duration;
@@ -364,10 +365,9 @@ fn page_crashed(ago: Option<u64>, nav: Option<String>) { on_page_crashed(&serde_
 
 /// Для заставки: сервер страницы отвечает по-настоящему (200 и «ok»), а не 502 - сначала напрямую, потом через системный прокси.
 /// 30.09 (владелец): кнопка «Отправить отчёт об ошибке» на экране загрузки (как на Android). Обращение уходит запросом самого
-/// приложения (не страницы): напрямую, не вышло - через вход ядра (туннель), потом через сервер NL-2. Владельцу - как «Не работает?».
+/// приложения (не страницы): через физический маршрут к основному/резервному адресу. До квитанции хранится на диске.
 #[tauri::command]
 async fn splash_report(app: AppHandle, why: String, secs: u64) -> bool {
-    let tok = load_token();
     let why: String = why.chars().take(120).collect();
     let body = serde_json::json!({
         "text": format!("Экран загрузки приложения на компьютере: «{why}», {secs} с"),
@@ -377,19 +377,10 @@ async fn splash_report(app: AppHandle, why: String, secs: u64) -> bool {
                  "page": "splash", "splash": why, "secs": secs}
     });
     remote_log("splash.report", serde_json::json!({"why": why, "secs": secs}));
-    let tries: [(&str, Option<u16>); 3] = [(BASE, None), (BASE, Some(vpn::PROBE_PORT)), (BASE_ALT, None)];
-    for (base, proxy) in tries {
-        let b = reqwest::Client::builder().timeout(Duration::from_secs(12));
-        let b = match proxy {
-            Some(p) => match reqwest::Proxy::all(format!("http://127.0.0.1:{p}")) { Ok(px) => b.proxy(px), Err(_) => continue },
-            None => b.no_proxy(),
-        };
-        let Ok(c) = b.build() else { continue };
-        let mut rq = c.post(format!("{base}/api/app/feedback")).json(&body);
-        if !tok.is_empty() { rq = rq.header("X-App-Token", tok.clone()); }
-        if let Ok(r) = rq.send().await { if r.status().is_success() { return true; } }
-    }
-    false
+    let saved = failure_reports::enqueue(body);
+    if !saved { return false; }
+    failure_reports::flush().await
+
 }
 
 #[tauri::command]
@@ -1176,6 +1167,7 @@ fn main() {
         .setup(|app| {
             remote_log("app.start", serde_json::json!({"hasToken": !load_token().is_empty()}));
             build_main(app.handle())?;
+            failure_reports::start();
             // 29.09: insellers://open (Mac - событие ссылки в запущенное приложение) - показать окно
             {
                 use tauri_plugin_deep_link::DeepLinkExt;

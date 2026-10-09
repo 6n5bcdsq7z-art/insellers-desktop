@@ -29,6 +29,7 @@ url = "2"
 # обновление своей загрузкой (upd.rs): проверка подписи как у tauri-plugin-updater
 minisign-verify = "0.2"
 base64 = "0.22"
+ring = "0.17"
 # замеры связи (probe.rs): TLS с нужным SNI на IP сервера - тот же rustls 0.23 (ring), что у reqwest
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 webpki-roots = "1"
@@ -37,7 +38,6 @@ webpki-roots = "1"
 [target.'cfg(target_os = "macos")'.dependencies]
 zstd = { version = "0.13", features = ["experimental"] }
 flate2 = "1"
-ring = "0.17"
 
 [profile.release]
 codegen-units = 1
