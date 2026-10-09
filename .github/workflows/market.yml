@@ -46,6 +46,8 @@ jobs:
             market/apps/desktop/dist/*.dmg
           if-no-files-found: error
   android:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -76,7 +78,10 @@ jobs:
             echo 'signed=false' >> "$GITHUB_OUTPUT"
           fi
       - name: Build
-        run: gradle --no-daemon --max-workers=2 assembleDebug assembleRelease lint
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle --no-daemon --max-workers=2 assembleDebug assembleRelease lint 2>&1 | tee android-build.log
         env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.MARKET_ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.MARKET_ANDROID_KEY_ALIAS }}
@@ -95,6 +100,22 @@ jobs:
           name: market-android
           path: market/apps/android/out/*.apk
           if-no-files-found: error
+      - name: Save build diagnostics
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [ -f android-build.log ] || echo 'Build step did not run; inspect preceding Actions steps.' > android-build.log
+          tail -c 60000 android-build.log > android-build-tail.log
+          gh api "repos/$GITHUB_REPOSITORY/git/refs/heads/market-ci-logs" >/dev/null 2>&1 || \
+            gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref=refs/heads/market-ci-logs -f sha="$GITHUB_SHA" >/dev/null
+          FILE_SHA=$(gh api "repos/$GITHUB_REPOSITORY/contents/logs/market-android.log?ref=market-ci-logs" --jq .sha 2>/dev/null || true)
+          PAYLOAD=$(base64 -w0 android-build-tail.log)
+          args=(-f message="Android build diagnostics $GITHUB_RUN_NUMBER" -f branch=market-ci-logs -f content="$PAYLOAD")
+          if [ -n "$FILE_SHA" ]; then args+=(-f sha="$FILE_SHA"); fi
+          gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/logs/market-android.log" "${args[@]}" >/dev/null
   release:
     needs: [desktop, android]
     runs-on: ubuntu-latest
