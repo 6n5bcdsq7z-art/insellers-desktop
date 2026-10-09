@@ -18,9 +18,9 @@ Daemon will be stopped at the end of the build
 > Task :app:processDebugMainManifest
 > Task :app:processDebugManifest
 > Task :app:mergeDebugShaders
-> Task :app:processDebugManifestForPackage
 > Task :app:compileDebugShaders NO-SOURCE
 > Task :app:generateDebugAssets UP-TO-DATE
+> Task :app:processDebugManifestForPackage
 > Task :app:mergeDebugAssets
 > Task :app:compressDebugAssets
 > Task :app:desugarDebugFileDependencies
@@ -31,8 +31,9 @@ Daemon will be stopped at the end of the build
 > Task :app:mergeLibDexDebug
 > Task :app:mergeDebugJniLibFolders
 > Task :app:mergeDebugNativeLibs NO-SOURCE
-> Task :app:processDebugResources
 > Task :app:stripDebugDebugSymbols NO-SOURCE
+> Task :app:processDebugResources
+> Task :app:validateSigningDebug
 
 > Task :app:compileDebugJavaWithJavac
 Note: Some input files use or override a deprecated API.
@@ -40,8 +41,6 @@ Note: Recompile with -Xlint:deprecation for details.
 
 > Task :app:dexBuilderDebug
 > Task :app:mergeDebugGlobalSynthetics
-> Task :app:mergeProjectDexDebug
-> Task :app:validateSigningDebug
 > Task :app:writeDebugAppMetadata
 > Task :app:writeDebugSigningConfigVersions
 > Task :app:preReleaseBuild UP-TO-DATE
@@ -51,6 +50,7 @@ Note: Recompile with -Xlint:deprecation for details.
 > Task :app:extractReleaseNativeSymbolTables NO-SOURCE
 > Task :app:mergeReleaseNativeDebugMetadata NO-SOURCE
 > Task :app:checkReleaseDuplicateClasses
+> Task :app:mergeProjectDexDebug
 > Task :app:javaPreCompileRelease
 > Task :app:checkReleaseAarMetadata
 > Task :app:generateReleaseResValues
@@ -90,35 +90,34 @@ Note: Recompile with -Xlint:deprecation for details.
 > Task :app:generateDebugLintReportModel
 > Task :app:preDebugUnitTestBuild UP-TO-DATE
 > Task :app:generateDebugUnitTestLintModel
+> Task :app:lintAnalyzeDebug
+> Task :app:lintAnalyzeDebugAndroidTest
 > Task :app:mergeReleaseResources
+> Task :app:lintAnalyzeDebugUnitTest
 > Task :app:processReleaseResources
+
+> Task :app:lintReportDebug
+Wrote HTML report to file:///home/runner/work/insellers-desktop/insellers-desktop/market/apps/android/app/build/reports/lint-results-debug.html
 
 > Task :app:compileReleaseJavaWithJavac
 Note: Some input files use or override a deprecated API.
 Note: Recompile with -Xlint:deprecation for details.
 
-> Task :app:lintAnalyzeDebug
 > Task :app:dexBuilderRelease
-> Task :app:mergeDexRelease
 > Task :app:mergeReleaseGlobalSynthetics
+> Task :app:mergeDexRelease
 > Task :app:generateReleaseLintVitalReportModel
 > Task :app:compileReleaseArtProfile
 > Task :app:optimizeReleaseResources
+> Task :app:lintDebug
+> Task :app:lint
 > Task :app:lintVitalAnalyzeRelease
 > Task :app:lintVitalReportRelease SKIPPED
 > Task :app:lintVitalRelease SKIPPED
 > Task :app:packageRelease
 > Task :app:createReleaseApkListingFileRedirect
 > Task :app:assembleRelease
-> Task :app:lintAnalyzeDebugAndroidTest
-> Task :app:lintAnalyzeDebugUnitTest
-
-> Task :app:lintReportDebug
-Wrote HTML report to file:///home/runner/work/insellers-desktop/insellers-desktop/market/apps/android/app/build/reports/lint-results-debug.html
-
-> Task :app:lintDebug
-> Task :app:lint
-gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run_2-1791570488341.json
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run_2-1791586186431.json
 
 [Incubating] Problems report is available at: file:///home/runner/work/insellers-desktop/insellers-desktop/market/apps/android/build/reports/problems/problems-report.html
 
@@ -128,5 +127,5 @@ You can use '--warning-mode all' to show the individual deprecation warnings and
 
 For more on this, please refer to https://docs.gradle.org/8.13/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
 
-BUILD SUCCESSFUL in 26s
+BUILD SUCCESSFUL in 16s
 82 actionable tasks: 82 executed
