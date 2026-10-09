@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="launcher_background">#0D1C32</color>
+    <item type="mipmap" name="ic_launcher">@mipmap/ic_launcher_artwork</item>
+</resources>
