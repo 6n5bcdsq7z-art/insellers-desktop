@@ -1,0 +1,74 @@
+{
+  "name": "insellers-market",
+  "productName": "INSELLERS",
+  "version": "1.0.0",
+  "description": "\u041f\u043e\u0441\u0442\u0430\u0432\u0449\u0438\u043a\u0438, \u0442\u043e\u0432\u0430\u0440\u044b \u0438 \u0437\u0430\u044f\u0432\u043a\u0438 INSELLERS",
+  "author": "INSELLERS",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "test": "node --test tests/*.test.cjs"
+  },
+  "devDependencies": {
+    "electron": "44.7.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "su.insellers.market",
+    "productName": "INSELLERS",
+    "artifactName": "INSELLERS-${version}-${os}-${arch}.${ext}",
+    "files": [
+      "main.cjs",
+      "policy.cjs",
+      "offline.html",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "../assets"
+    },
+    "mac": {
+      "category": "public.app-category.business",
+      "icon": "../assets/icon.png",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "icon": "../assets/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    },
+    "linux": {
+      "icon": "../assets/icon.png",
+      "target": [
+        "AppImage"
+      ],
+      "category": "Office"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/6n5bcdsq7z-art/insellers-desktop.git",
+    "directory": "market/apps/desktop"
+  }
+}

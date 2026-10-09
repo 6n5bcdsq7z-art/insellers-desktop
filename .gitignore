@@ -1,0 +1,7 @@
+market/apps/**/node_modules/
+market/apps/**/dist/
+market/apps/**/.gradle/
+market/apps/**/build/
+market/apps/android/local.properties
+*.jks
+*.keystore
