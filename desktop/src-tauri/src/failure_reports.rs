@@ -26,7 +26,8 @@ pub async fn flush() -> bool {
     let Some(path)=crate::data_path("pending-failure.json") else {return false};
     let Ok(raw)=std::fs::read_to_string(&path) else {return false};
     let Ok(entry)=serde_json::from_str::<Value>(&raw) else {return false};
-    let token=crate::load_token();
+    // Reports saved before login retain their anonymous identity.
+    let token=if entry["owner"]==owner("") {String::new()} else {crate::load_token()};
     if entry["owner"].as_str()!=Some(owner(&token).as_str()) {return false}
     let body=&entry["body"];
     // These IPs are also physical-route exceptions in tun::bypass_ips; no system proxy.
