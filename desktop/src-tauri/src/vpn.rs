@@ -635,6 +635,14 @@ fn freeze_now(hist: &std::collections::VecDeque<(u64, u64)>) -> bool {
     before >= 30_000 || (2_000..=60_000).contains(&tx2)
 }
 
+async fn freeze_confirmed() -> bool {
+    for seconds in [3, 4] {
+        let r = probe_real_t("32k", seconds).await;
+        if r.0 || r.3 == "core" || r.3.starts_with("http ") { return false; }
+    }
+    true
+}
+
 async fn freeze_watch(app: AppHandle, dir: PathBuf, gen: u32) {
     let client = match reqwest::Client::builder().no_proxy().timeout(Duration::from_millis(800)).build() { Ok(c) => c, Err(_) => return };
     let url = format!("http://127.0.0.1:{METRICS_PORT}/debug/vars");
@@ -673,6 +681,12 @@ async fn freeze_watch(app: AppHandle, dir: PathBuf, gen: u32) {
         if freeze_now(&hist) && now.saturating_sub(last_switch) > 4_000 {
             let t0 = if stall_since > 0 { stall_since } else { now };
             let cur = { let c = HOT_CUR.lock().unwrap().clone(); if c.is_empty() { "proxy".to_string() } else { c } };
+            let confirmed = freeze_confirmed().await;
+            if cur_gen(&app) != gen || !wanted(&app) { break; }
+            if !confirmed || !direct_ok().await {
+                hist.clear(); stall_since = 0; prev = None; last_switch = crate::now_ms();
+                continue;
+            }
             hot_mark_bad(&cur, 120_000);
             let from = cur_desc();
             if let Some(to) = hot_switch(&app, &dir, &cur).await {
@@ -1075,12 +1089,16 @@ async fn link_ok_within(secs: u64) -> bool {
     tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_millis(700))).await.ok();
     while t0.elapsed() < Duration::from_secs(secs) {
         for u in ["http://cp.cloudflare.com/generate_204", "http://connectivitycheck.gstatic.com/generate_204", "https://vpn.insellers.su/probe/204"] {
-            if let Ok(r) = client.get(u).send().await {
+            let remaining = Duration::from_secs(secs).saturating_sub(t0.elapsed());
+            if remaining.is_zero() { return false; }
+            if let Ok(r) = client.get(u).timeout(remaining.min(Duration::from_secs(4))).send().await {
                 let s = r.status().as_u16();
                 if s == 204 || s == 200 { return true; }
             }
         }
-        tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_millis(800))).await.ok();
+        let wait = Duration::from_millis(800).min(Duration::from_secs(secs).saturating_sub(t0.elapsed()));
+        if wait.is_zero() { break; }
+        tauri::async_runtime::spawn_blocking(move || std::thread::sleep(wait)).await.ok();
     }
     false
 }
