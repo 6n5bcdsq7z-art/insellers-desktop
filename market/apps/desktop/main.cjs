@@ -1,10 +1,12 @@
 'use strict';
-const { app, BrowserWindow, shell, Menu, dialog } = require('electron');
+const { app, BrowserWindow, shell, Menu, dialog, net } = require('electron');
 const { ORIGIN, isInternal, isExternal } = require('./policy.cjs');
 const path = require('node:path');
 const { autoUpdater } = require('electron-updater');
+const { SignedMacUpdater } = require('./mac-updates.cjs');
+const updater = process.platform === 'darwin' ? new SignedMacUpdater({ app, net }) : autoUpdater;
 const { createUpdates } = require('./updates.cjs');
-const updates = createUpdates({ updater: autoUpdater, dialog, app, getWindow: () => window });
+const updates = createUpdates({ updater, dialog, app, getWindow: () => window });
 let window;
 const entry = ORIGIN + '/?app=desktop';
 function openExternal(url) { if (isExternal(url)) shell.openExternal(url).catch(() => {}); }

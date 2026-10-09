@@ -61,6 +61,26 @@ jobs:
         run: |
           set -o pipefail
           npm run dist -- ${{ matrix.target }} --publish never 2>&1 | tee desktop-build.log
+      - name: Sign Mac update packages with VPN release key
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [ -n "$TAURI_SIGNING_PRIVATE_KEY" ] || { echo 'VPN update signing key is required for Mac packages'; exit 1; }
+          for archive in dist/*.zip; do
+            npx tauri signer sign -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" --app-version "1.0.$GITHUB_RUN_NUMBER" "$archive" >/dev/null
+          done
+          python ../../scripts/mac_feed.py dist
+          node - <<'JS'
+          const fs=require('fs');const {verifyMinisign}=require('./minisign.cjs');
+          const feed=JSON.parse(fs.readFileSync('dist/latest-mac-signed.json'));
+          const pub='dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM4RDRDMDUwRjk3MjNDMzkKUldRNVBITDVVTURVT0FWRmQyVFRpNi9BR05oWnBtODhzeVJxNThnR0RnZVkzZkdzWERxMmRhU0wK';
+          for(const [arch, file] of Object.entries(feed.files))verifyMinisign(fs.readFileSync('dist/INSELLERS-'+feed.version+'-mac-'+arch+'.zip'),file.signature,pub,feed.version);
+          console.log('Both Mac updater archives verified against pinned VPN release public key');
+          JS
       - name: Save desktop diagnostics
         continue-on-error: true
         if: always()
@@ -92,6 +112,8 @@ jobs:
             market/apps/desktop/dist/*.zip
             market/apps/desktop/dist/*.yml
             market/apps/desktop/dist/*.blockmap
+            market/apps/desktop/dist/*.json
+            market/apps/desktop/dist/*.sig
           if-no-files-found: error
   android:
     permissions:
@@ -186,17 +208,17 @@ jobs:
         run: |
           set -euo pipefail
           cd installers
-          sha256sum *.exe *.dmg *.apk *.zip *.yml *.json *.blockmap > SHA256SUMS.txt
+          sha256sum *.exe *.dmg *.apk *.zip *.yml *.json *.blockmap *.sig > SHA256SUMS.txt
           cat > release-notes.txt <<'NOTES'
           INSELLERS — поставщики, товары и заявки. Android, Windows и macOS (Apple Silicon / Intel).
 
           Интерфейс и данные общие с Telegram mini-app; изменения сервера приходят без переустановки.
           Вход: начните вход в приложении, откройте ссылку Telegram, сверьте код, подтвердите и вернитесь.
 
-          Обновления: проверка при запуске и кнопка «Проверить обновления», загрузка пакета и установка. Windows: обновлятор приложения. Mac: ZIP для обновлятора, требуется подпись Apple. Android: проверка SHA-256 и совпадения ключа подписи перед системной установкой.
+          Обновления: проверка при запуске и кнопка «Проверить обновления», загрузка пакета и установка. Windows: обновлятор приложения. Mac: ZIP для обновлятора, проверка minisign-подписи и подписанной версии тем же ключом, что в VPN; сертификат Apple для самообновления не требуется. Android: проверка SHA-256 и совпадения ключа подписи перед системной установкой.
 
           Выпуск для проверки: Windows/macOS пока без подписи разработчика и нотарификации Apple.
           Файл android-test.apk — тестовая сборка. Для стабильных Android-обновлений требуется постоянный ключ подписи; тестовая сборка не предназначена для массового распространения.
           NOTES
-          gh release create "market-${GITHUB_RUN_NUMBER}-${GITHUB_SHA:0:7}" *.exe *.dmg *.apk *.zip *.yml *.json *.blockmap SHA256SUMS.txt \
+          gh release create "market-${GITHUB_RUN_NUMBER}-${GITHUB_SHA:0:7}" *.exe *.dmg *.apk *.zip *.yml *.json *.blockmap *.sig SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "INSELLERS — приложения (${GITHUB_SHA:0:7})" --notes-file release-notes.txt

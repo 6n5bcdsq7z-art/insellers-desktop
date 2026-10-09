@@ -36,7 +36,7 @@ function createUpdates({ updater, dialog, app, getWindow, timers = globalThis })
   updater.on('error', () => {
     progress(-1);
     if (manual || downloading) void box({ type: 'error', message: 'Не удалось обновить приложение.',
-      detail: 'Проверьте интернет и попробуйте ещё раз. На Mac для установки через обновлятор требуется подписанная версия приложения.', buttons: ['Хорошо'] });
+      detail: 'Проверьте интернет и попробуйте ещё раз. Для установки приложению нужны права записи в папку, где оно установлено.', buttons: ['Хорошо'] });
   });
   async function check(isManual = false) {
     if (ready) {
