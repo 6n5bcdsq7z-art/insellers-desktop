@@ -58,12 +58,14 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.13'
       - name: SDK
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+        shell: bash
+        run: |
+          set -o pipefail
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-35' 'build-tools;35.0.0' 2>&1 | tee android-build.log
       - name: Android signing configuration
         id: signing
         shell: bash
@@ -81,7 +83,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          gradle --no-daemon --max-workers=2 assembleDebug assembleRelease lint 2>&1 | tee android-build.log
+          gradle --no-daemon --max-workers=2 assembleDebug assembleRelease lint 2>&1 | tee -a android-build.log
         env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.MARKET_ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.MARKET_ANDROID_KEY_ALIAS }}
