@@ -383,7 +383,7 @@ fn pick_config(raw: Value, choice: &str) -> Value {
     // ядро само переключается на рабочий путь. Один путь — только при явном выборе протокола.
     if choice != "reality" && choice != "xhttp" && choice != "hysteria2" {
         let outs_of = |c: &Value| -> Vec<Value> { c["outbounds"].as_array().cloned().unwrap_or_default() };
-        if let Some(c) = list.iter().find(|c| outs_of(c).iter().any(is_proxy)) { return c.clone(); }
+        if let Some(c) = list.iter().find(|c| outs_of(c).iter().any(|o| is_proxy(o) || is_hy(o))) { return c.clone(); }
     }
     let want = |o: &Value| -> bool {
         match choice {
@@ -878,7 +878,7 @@ async fn subscription_endpoints(client: &reqwest::Client, urls: Vec<String>) -> 
 }
 
 /// Кандидаты для подключения: сначала выбор человека (или «Автовыбор» сервера), потом каждый путь по одному
-/// в порядке сервера (TCP-пути, hy2 - последним). Пути, упавшие за последние 30 минут, - в конец. Не больше 5.
+/// в порядке сервера, без принудительного понижения hy2. Пути, упавшие за последние 30 минут, - в конец. Не больше 5.
 async fn xray_candidates(app: &AppHandle, client: &reqwest::Client, url: &str, offline: bool, choice: &str,
                          dir: &PathBuf, last: &PathBuf) -> Result<Vec<(String, Value)>, String> {
     notify(app, "connecting", if offline { "Читаем сохранённую конфигурацию…" } else { "Получаем конфигурацию VPN…" });
@@ -906,16 +906,14 @@ async fn xray_candidates(app: &AppHandle, client: &reqwest::Client, url: &str, o
     if let Some(txt) = fetched {
         let raw: Value = serde_json::from_str(&txt).map_err(|_| "Сервер ещё не отдаёт конфигурацию для приложения".to_string())?;
         let list: Vec<Value> = match raw.clone() { Value::Array(a) => a, v => vec![v] };
-        // hy2 (UDP) первым - только если человек сам выбрал «Для Wi-Fi»
+        // Preserve the server recommendation across all supported transports.
         raw_cands.push(pick_config(raw, choice));
-        let mut hys = Vec::new();
         // ручной выбор протокола - только он (26.09, владелец: при ручном выборе сами не переключаем, только сообщаем)
         for c in if manual_choice(choice) { &list[..0] } else { &list[..] } {
             for o in c["outbounds"].as_array().cloned().unwrap_or_default() {
-                if is_proxy(&o) { raw_cands.push(single_from(c, &o)); } else if is_hy(&o) { hys.push(single_from(c, &o)); }
+                if is_proxy(&o) || is_hy(&o) { raw_cands.push(single_from(c, &o)); }
             }
         }
-        raw_cands.extend(hys);
         prepared = false;
     } else {
         let b = std::fs::read(last).map_err(|_| "Нет связи с сервером".to_string())?;

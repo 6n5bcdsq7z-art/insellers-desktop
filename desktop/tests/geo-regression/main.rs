@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 use std::{path::PathBuf,time::Duration};
+use serde_json::{Value,json};
+include!(concat!(env!("OUT_DIR"),"/choice.rs"));
 extern crate self as tauri;
 pub mod async_runtime {pub use tokio::{spawn,task::spawn_blocking};}
 struct AppHandle;
@@ -24,6 +26,11 @@ async fn serve_once(code:u16, body:&'static str)->String {
  format!("http://{addr}/sub/fixture")
 }
 #[tokio::main]async fn main(){
+ let hy=json!({"outbounds":[{"tag":"recommended-hy","protocol":"hysteria2"}]});
+ let tcp=json!({"outbounds":[{"tag":"fallback-tcp","protocol":"vless"}]});
+ assert_eq!(pick_config(json!([hy.clone(),tcp.clone()]),"auto")["outbounds"][0]["tag"],"recommended-hy");
+ assert_eq!(pick_config(json!([hy.clone(),tcp.clone()]),"reality")["outbounds"][0]["tag"],"fallback-tcp");
+ assert_eq!(pick_config(json!([tcp,hy]),"hysteria2")["outbounds"][0]["tag"],"recommended-hy");
  assert_eq!(subscription_mirror("https://direct.insellers.su/sub/key?auto=1"),Some("https://n2.insellers.su/sub/key?auto=1".into()));
  assert_eq!(subscription_mirror("https://direct.insellers.su.evil/sub"),None);
  let client=reqwest::Client::builder().no_proxy().build().unwrap();

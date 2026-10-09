@@ -401,6 +401,7 @@ name = "insellers-geo-regression"
 version = "1.0.0"
 dependencies = [
  "reqwest",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
