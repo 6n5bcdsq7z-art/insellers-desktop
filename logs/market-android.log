@@ -18,12 +18,12 @@ Daemon will be stopped at the end of the build
 > Task :app:processDebugMainManifest
 > Task :app:processDebugManifest
 > Task :app:mergeDebugShaders
-> Task :app:processDebugManifestForPackage
 > Task :app:compileDebugShaders NO-SOURCE
 > Task :app:generateDebugAssets UP-TO-DATE
 > Task :app:mergeDebugAssets
 > Task :app:compressDebugAssets
 > Task :app:desugarDebugFileDependencies
+> Task :app:processDebugManifestForPackage
 > Task :app:processDebugJavaRes NO-SOURCE
 > Task :app:mergeDebugJavaResource
 > Task :app:checkDebugDuplicateClasses
@@ -99,10 +99,10 @@ Note: Recompile with -Xlint:deprecation for details.
 
 > Task :app:lintAnalyzeDebug
 > Task :app:dexBuilderRelease
-> Task :app:mergeDexRelease
 > Task :app:mergeReleaseGlobalSynthetics
-> Task :app:compileReleaseArtProfile
+> Task :app:mergeDexRelease
 > Task :app:generateReleaseLintVitalReportModel
+> Task :app:compileReleaseArtProfile
 > Task :app:optimizeReleaseResources
 > Task :app:lintVitalAnalyzeRelease
 > Task :app:lintVitalReportRelease SKIPPED
@@ -118,7 +118,7 @@ Wrote HTML report to file:///home/runner/work/insellers-desktop/insellers-deskto
 
 > Task :app:lintDebug
 > Task :app:lint
-gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run_2-1791569156296.json
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run_2-1791569396967.json
 
 [Incubating] Problems report is available at: file:///home/runner/work/insellers-desktop/insellers-desktop/market/apps/android/build/reports/problems/problems-report.html
 
@@ -128,5 +128,5 @@ You can use '--warning-mode all' to show the individual deprecation warnings and
 
 For more on this, please refer to https://docs.gradle.org/8.13/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
 
-BUILD SUCCESSFUL in 27s
+BUILD SUCCESSFUL in 28s
 82 actionable tasks: 82 executed
