@@ -1,0 +1,4 @@
+use std::{env,fs,path::PathBuf};
+fn main(){let src=PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../src-tauri/src/vpn.rs");println!("cargo:rerun-if-changed={}",src.display());let s=fs::read_to_string(src).unwrap();let a=s.find("static GEO_UPDATING:").unwrap();let b=a+s[a..].find("/// Убираем правила").unwrap();fs::write(PathBuf::from(env::var("OUT_DIR").unwrap()).join("geo.rs"),&s[a..b]).unwrap();
+let a=s.find("    let (subscription, requested_choice) =").unwrap();let b=a+s[a..].find("    let (url, until)").unwrap();
+fs::write(PathBuf::from(env::var("OUT_DIR").unwrap()).join("bootstrap.rs"),format!("async fn bootstrap(client:reqwest::Client,token:String)->(Result<String,String>,String){{{} (subscription,requested_choice)}}",&s[a..b])).unwrap();}

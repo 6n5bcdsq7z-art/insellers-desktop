@@ -2,7 +2,11 @@
 use std::{fs::File, io::{self, Write}, path::Path};
 
 pub(crate) fn write_private(path: &Path, value: &str) -> bool {
-    write_private_with(path, |file| file.write_all(value.as_bytes())).is_ok()
+    write_private_bytes(path, value.as_bytes())
+}
+
+pub(crate) fn write_private_bytes(path: &Path, value: &[u8]) -> bool {
+    write_private_with(path, |file| file.write_all(value)).is_ok()
 }
 
 fn write_private_with(path: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {

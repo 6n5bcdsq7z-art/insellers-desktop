@@ -347,7 +347,7 @@ fn awg_text(v: &Value) -> Result<String, String> {
 }
 
 async fn transport_choice(client: &reqwest::Client, token: &str) -> String {
-    let r = client.get(format!("{}/api/transport", crate::BASE)).header("X-App-Token", token).send().await;
+    let r = client.get(format!("{}/api/transport", crate::BASE)).header("X-App-Token", token).timeout(Duration::from_secs(8)).send().await;
     match r {
         // режим продления (26.09): сервер отдаёт grace=true - AmneziaWG в нём не пускается, берём Xray «только Telegram»
         // (как при «Автовыборе»); после ролика/оплаты grace=false - при следующем подключении снова выбранный протокол
@@ -1116,27 +1116,36 @@ fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(d)
 }
 
-async fn ensure_geo(app: &AppHandle, dir: &PathBuf) -> bool {
-    let client = match http() { Ok(c) => c, Err(_) => return false };
-    let mut ok = true;
+static GEO_UPDATING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn usable_geo(p: &std::path::Path) -> bool {
+    std::fs::metadata(p).map(|m| m.is_file() && m.len() > 1024).unwrap_or(false)
+}
+async fn refresh_geo(dir: PathBuf) {
+    struct Done;
+    impl Drop for Done { fn drop(&mut self) { GEO_UPDATING.store(false, std::sync::atomic::Ordering::SeqCst); } }
+    let _done = Done;
+    let client = match http() { Ok(c) => c, Err(_) => return };
     for f in ["geoip.dat", "geosite.dat"] {
         let p = dir.join(f);
-        let fresh = std::fs::metadata(&p).ok()
-            .and_then(|m| m.modified().ok())
-            .map(|t| t.elapsed().map(|e| e.as_secs() < 7 * 86400).unwrap_or(false))
-            .unwrap_or(false);
-        if fresh { continue; }
-        let url = format!("{}/app/geo/{}", crate::BASE, f);
-        match client.get(&url).send().await {
-            Ok(r) if r.status().is_success() => match r.bytes().await {
-                Ok(b) if b.len() > 1024 => { let _ = std::fs::write(&p, &b); }
-                _ => ok = p.exists() && ok,
-            },
-            _ => ok = p.exists() && ok,
+        let fresh = std::fs::metadata(&p).ok().and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok()).map(|a| a.as_secs() < 7 * 86400).unwrap_or(false);
+        if usable_geo(&p) && fresh { continue; }
+        if let Ok(r) = client.get(format!("{}/app/geo/{}", crate::BASE, f)).send().await {
+            if r.status().is_success() {
+                if let Ok(b) = r.bytes().await {
+                    if b.len() > 1024 { let _ = crate::private_file::write_private_bytes(&p, &b); }
+                }
+            }
         }
     }
-    let _ = app;
-    ok
+}
+async fn ensure_geo(_app: &AppHandle, dir: &PathBuf) -> bool {
+    let available = ["geoip.dat", "geosite.dat"].iter().all(|f| usable_geo(&dir.join(f)));
+    if !GEO_UPDATING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        if available { tauri::async_runtime::spawn(refresh_geo(dir.clone())); }
+        else { refresh_geo(dir.clone()).await; }
+    }
+    ["geoip.dat", "geosite.dat"].iter().all(|f| usable_geo(&dir.join(f)))
 }
 
 /// Убираем правила с geoip:/geosite:, если гео-файлов нет — иначе Xray не стартует.
@@ -1277,8 +1286,15 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     // ещё не отошёл после закрытия другого VPN) - подключаемся по ней, а не пишем «Нет связи с сервером», пока Happ работает.
     let last = dir.join("config.last.json");
     // 1) ссылка на свою подписку (или гостевая - ограниченный режим до входа / пока подписки нет)
+    let bootstrap_started = std::time::Instant::now();
+    let (subscription, requested_choice) = if !token.is_empty() {
+        let choice_client = client.clone(); let choice_token = token.clone();
+        let choice_job = tauri::async_runtime::spawn(async move { transport_choice(&choice_client, &choice_token).await });
+        let sub = sub_url(&client, &token).await;
+        (sub, choice_job.await.unwrap_or_default())
+    } else { (Err("guest".to_string()), String::new()) };
     let (url, until) = if !token.is_empty() {
-        match sub_url(&client, &token).await {
+        match subscription {
             Ok(u) => (u, 0u64),
             Err(e) => match guest {
                 Some(g) => g,
@@ -1290,12 +1306,13 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     } else {
         guest.ok_or("Гостевой доступ закончился - войдите через Telegram")?
     };
+    crate::remote_log("vpn.bootstrap", json!({"ms":bootstrap_started.elapsed().as_millis() as u64,"stage":"metadata"}));
     let offline = url.is_empty();   // сервер недоступен - едем по сохранённой конфигурации
     if offline {
         notify(&app, "connecting", "Подключаемся…");   // 29.09: не пугаем - после подключения свежие настройки подтянутся через туннель
         crate::remote_log("vpn.cached_config", json!({}));
     }
-    let choice = if token.is_empty() || offline { String::new() } else { transport_choice(&client, &token).await };
+    let choice = if token.is_empty() || offline { String::new() } else { requested_choice };
     // 26.09 (владелец): ручной протокол не пропускал трафик - ВРЕМЕННО «Автовыбор» (сервер по ?auto=1 отдаёт все пути),
     // выбор человека не трогаем; через 15 мин снова пробуем его (проверка пути ниже переподключит)
     let temp_auto = manual_choice(&choice) && crate::now_ms() < TEMP_AUTO_UNTIL.load(std::sync::atomic::Ordering::SeqCst);

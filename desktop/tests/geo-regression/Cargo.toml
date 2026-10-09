@@ -1,0 +1,11 @@
+[package]
+name = "insellers-geo-regression"
+version = "1.0.0"
+edition = "2021"
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
+tempfile = "=3.23.0"
+[[bin]]
+name = "geo-regression"
+path = "main.rs"
