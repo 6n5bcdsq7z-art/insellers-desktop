@@ -4,7 +4,10 @@ function createUpdates({ updater, dialog, app, getWindow, timers = globalThis })
   let checking = false, downloading = false, manual = false, ready = false, offered = '';
   updater.autoDownload = false;
   updater.autoInstallOnAppQuit = false;
-  const box = options => dialog.showMessageBox(getWindow(), { title: 'Обновление INSELLERS', ...options });
+  const box = options => {
+    const window = getWindow(), message = { title: 'Обновление INSELLERS', ...options };
+    return window && !window.isDestroyed() ? dialog.showMessageBox(window, message) : dialog.showMessageBox(message);
+  };
   function progress(value) { const w = getWindow(); if (w && !w.isDestroyed()) w.setProgressBar(value); }
   async function download() {
     if (downloading || ready) return;

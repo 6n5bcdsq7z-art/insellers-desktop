@@ -62,6 +62,7 @@ jobs:
           set -o pipefail
           npm run dist -- ${{ matrix.target }} --publish never 2>&1 | tee desktop-build.log
       - name: Save desktop diagnostics
+        continue-on-error: true
         if: always()
         shell: bash
         env:
@@ -73,7 +74,7 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/git/refs/heads/market-ci-logs" >/dev/null 2>&1 || \
             gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref=refs/heads/market-ci-logs -f sha="$GITHUB_SHA" >/dev/null
           FILE="logs/market-$RUNNER_OS.log"
-          PAYLOAD=$(base64 -w0 desktop-tail.log 2>/dev/null || base64 desktop-tail.log | tr -d '\n')
+          PAYLOAD=$(node -e "process.stdout.write(require('fs').readFileSync('desktop-tail.log').toString('base64'))")
           for attempt in 1 2 3 4; do
             FILE_SHA=$(gh api "repos/$GITHUB_REPOSITORY/contents/$FILE?ref=market-ci-logs" --jq .sha 2>/dev/null || true)
             args=(-f message="Desktop diagnostics $RUNNER_OS $GITHUB_RUN_NUMBER" -f branch=market-ci-logs -f content="$PAYLOAD")
