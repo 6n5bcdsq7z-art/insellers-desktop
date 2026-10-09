@@ -11,6 +11,8 @@ concurrency:
   cancel-in-progress: true
 jobs:
   desktop:
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -34,14 +36,52 @@ jobs:
       - run: npm test
       - name: Build number
         run: node -e "const fs=require('fs');const p=require('./package.json');p.version='1.0.'+process.env.GITHUB_RUN_NUMBER;fs.writeFileSync('package.json',JSON.stringify(p,null,2))"
-      - name: Build installers
-        run: npm run dist -- ${{ matrix.target }} --publish never
+      - name: Optional signing
+        shell: bash
         env:
-          CSC_LINK: ${{ runner.os == 'macOS' && secrets.MARKET_MAC_CSC_LINK || secrets.MARKET_WIN_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MARKET_MAC_CSC_KEY_PASSWORD || secrets.MARKET_WIN_CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.MARKET_APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.MARKET_APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.MARKET_APPLE_TEAM_ID }}
+          INPUT_CSC_LINK: ${{ runner.os == 'macOS' && secrets.MARKET_MAC_CSC_LINK || secrets.MARKET_WIN_CSC_LINK }}
+          INPUT_CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MARKET_MAC_CSC_KEY_PASSWORD || secrets.MARKET_WIN_CSC_KEY_PASSWORD }}
+          INPUT_APPLE_ID: ${{ secrets.MARKET_APPLE_ID }}
+          INPUT_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.MARKET_APPLE_APP_SPECIFIC_PASSWORD }}
+          INPUT_APPLE_TEAM_ID: ${{ secrets.MARKET_APPLE_TEAM_ID }}
+        run: |
+          node - <<'JS'
+          const fs = require('fs');
+          const crypto = require('crypto');
+          const set = (name, value) => { const d=crypto.randomBytes(16).toString('hex');fs.appendFileSync(process.env.GITHUB_ENV, name+'<<'+d+'\n'+value+'\n'+d+'\n'); };
+          if (process.env.INPUT_CSC_LINK) {
+            set('CSC_LINK', process.env.INPUT_CSC_LINK);
+            set('CSC_KEY_PASSWORD', process.env.INPUT_CSC_KEY_PASSWORD || '');
+          } else set('CSC_IDENTITY_AUTO_DISCOVERY', 'false');
+          const apple = ['APPLE_ID','APPLE_APP_SPECIFIC_PASSWORD','APPLE_TEAM_ID'];
+          if (apple.every(k=>process.env['INPUT_'+k])) apple.forEach(k=>set(k,process.env['INPUT_'+k]));
+          JS
+      - name: Build installers
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run dist -- ${{ matrix.target }} --publish never 2>&1 | tee desktop-build.log
+      - name: Save desktop diagnostics
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [ -f desktop-build.log ] || echo 'Build step did not run.' > desktop-build.log
+          tail -c 60000 desktop-build.log > desktop-tail.log
+          gh api "repos/$GITHUB_REPOSITORY/git/refs/heads/market-ci-logs" >/dev/null 2>&1 || \
+            gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref=refs/heads/market-ci-logs -f sha="$GITHUB_SHA" >/dev/null
+          FILE="logs/market-$RUNNER_OS.log"
+          PAYLOAD=$(base64 -w0 desktop-tail.log 2>/dev/null || base64 desktop-tail.log | tr -d '\n')
+          for attempt in 1 2 3 4; do
+            FILE_SHA=$(gh api "repos/$GITHUB_REPOSITORY/contents/$FILE?ref=market-ci-logs" --jq .sha 2>/dev/null || true)
+            args=(-f message="Desktop diagnostics $RUNNER_OS $GITHUB_RUN_NUMBER" -f branch=market-ci-logs -f content="$PAYLOAD")
+            if [ -n "$FILE_SHA" ]; then args+=(-f sha="$FILE_SHA"); fi
+            if gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/$FILE" "${args[@]}" >/dev/null; then break; fi
+            [ "$attempt" != 4 ] || exit 1
+            sleep 2
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: market-${{ matrix.os }}
