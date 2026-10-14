@@ -1007,6 +1007,17 @@ async fn vpn_connect(app: AppHandle) -> Result<(), String> {
         Ok(()) => { remote_log("vpn.connected", serde_json::json!({})); telemetry::result("connected", "", ""); vpn::notify(&app, "connected", &vpn::take_connect_msg()); Ok(()) }
         Err(e) if e == "BUSY" => Err(e),   // подключение уже идёт — второй раз не запускаем
         Err(e) if e == "CANCELLED" => { telemetry::result("cancelled", "", ""); vpn::notify(&app, "disconnected", ""); Err(e) }   // нажали «Отключить» во время подключения
+        Err(e) if e.starts_with("BOOTSTRAP:") => {
+            let message = e.trim_start_matches("BOOTSTRAP:");
+            telemetry::result("failed", "config", message);
+            remote_log("vpn.bootstrap_error", serde_json::json!({"err": message}));
+            if vpn_running(&app) {
+                vpn::notify(&app, "connected", "Не удалось получить новые настройки. Сохранили текущее подключение.");
+            } else {
+                vpn::notify(&app, "error", message);
+            }
+            Err(message.to_string())
+        }
         Err(e) => {
             let stage = if e.starts_with("OTHER_VPN:") { "tunnel" } else if e.contains("подписк") || e.contains("доступ") || e.contains("конфиг") { "config" } else { "handshake" };
             telemetry::result("failed", stage, &e);

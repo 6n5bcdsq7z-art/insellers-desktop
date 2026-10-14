@@ -1306,24 +1306,14 @@ pub async fn start(app: AppHandle) -> Result<(), String> {
 async fn start_once(app: AppHandle) -> Result<(), String> {
     if STARTING.swap(true, std::sync::atomic::Ordering::SeqCst) { return Err("BUSY".into()); }
     let _guard = StartGuard;
-    stop(&app);
     let my_gen = cur_gen(&app);   // нажали «Отключить» во время подключения — поколение сменится, всё отменяем
-    // 0) закрываем чужие VPN-клиенты
-    #[allow(unused_mut)]
-    let (mut killed, failed) = kill_other_vpns();
-    #[cfg(target_os = "macos")]
-    for n in stop_other_ne_vpns() { if !killed.contains(&n) { killed.push(n); } }
-    if !killed.is_empty() { notify(&app, "connecting", &format!("Отключаем другой VPN: {}…", killed.join(", "))); }
-    if !failed.is_empty() {
-        return Err(format!("OTHER_VPN:Не получилось закрыть {} - закройте его вручную и нажмите «Включить» ещё раз", failed.join(", ")));
-    }
-    if !killed.is_empty() { std::thread::sleep(Duration::from_millis(800)); }
+    let bootstrap_error = |e: String| format!("BOOTSTRAP:{e}");
     let token = crate::load_token();
     let guest = crate::guest_load();
-    if token.is_empty() && guest.is_none() { return Err("Войдите через Telegram".into()); }
+    if token.is_empty() && guest.is_none() { return Err(bootstrap_error("Войдите через Telegram".into())); }
     let guest_sub0: Option<String> = guest.as_ref().map(|(u, _)| u.rsplit('/').next().unwrap_or("").to_string());
-    let client = http()?;
-    let dir = data_dir(&app)?;
+    let client = http().map_err(&bootstrap_error)?;
+    let dir = data_dir(&app).map_err(&bootstrap_error)?;
     // 26.09: последняя рабочая конфигурация. Если наш сервер напрямую недоступен (сеть режет vpn.insellers.su или Мак
     // ещё не отошёл после закрытия другого VPN) - подключаемся по ней, а не пишем «Нет связи с сервером», пока Happ работает.
     let last = dir.join("config.last.json");
@@ -1342,12 +1332,12 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
             Err(e) => match guest {
                 Some(g) => g,
                 None => {
-                    if (e == "Нет связи с сервером" || e == "Сервер ответил неверно") && fresh_last(&last) { (String::new(), 0u64) } else { return Err(e) }
+                    if (e == "Нет связи с сервером" || e == "Сервер ответил неверно") && fresh_last(&last) { (String::new(), 0u64) } else { return Err(bootstrap_error(e)) }
                 }
             },
         }
     } else {
-        guest.ok_or("Гостевой доступ закончился - войдите через Telegram")?
+        guest.ok_or_else(|| bootstrap_error("Гостевой доступ закончился - войдите через Telegram".into()))?
     };
     crate::remote_log("vpn.bootstrap", json!({"ms":bootstrap_started.elapsed().as_millis() as u64,"stage":"metadata"}));
     let offline = url.is_empty();   // сервер недоступен - едем по сохранённой конфигурации
@@ -1372,7 +1362,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         match got {
             Ok(conf) => {
                 let p = dir.join("awg.conf");
-                std::fs::write(&p, &conf).map_err(|e| e.to_string())?;
+                std::fs::write(&p, &conf).map_err(|e| bootstrap_error(e.to_string()))?;
                 // 28.09 (00000c): с маршрутизатором wireproxy слушает только внутренний SOCKS, вход 38808/38809 - у маршрутизатора
                 let _ = std::fs::write(dir.join("awg-inner.conf"), awg_inner(&conf));
                 Some(p)
@@ -1384,6 +1374,30 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
             }
         }
     } else { None };
+    // Obtain usable configuration before disconnecting another working VPN.
+    // A failed bootstrap must leave that connectivity path available.
+    let prepared_candidates = if awg_path.is_none() {
+        Some(xray_candidates(&app, &client, &url, offline, &choice, &dir, &last).await
+            .map_err(|e| if e.starts_with("RETRY_AUTO_BAD:") { e } else { bootstrap_error(e) })?)
+    } else { None };
+    if awg_path.is_some() && AWG_ROUTER {
+        let _ = ensure_geo(&app, &dir).await;
+        fetch_ad_hosts(&client, &dir).await;
+    }
+    if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
+    // Keep the current tunnel and system proxy until bootstrap succeeds.
+    stop(&app);
+    let my_gen = cur_gen(&app);
+    // 0) закрываем чужие VPN-клиенты
+    #[allow(unused_mut)]
+    let (mut killed, failed) = kill_other_vpns();
+    #[cfg(target_os = "macos")]
+    for n in stop_other_ne_vpns() { if !killed.contains(&n) { killed.push(n); } }
+    if !killed.is_empty() { notify(&app, "connecting", &format!("Отключаем другой VPN: {}…", killed.join(", "))); }
+    if !failed.is_empty() {
+        return Err(format!("OTHER_VPN:Не получилось закрыть {} - закройте его вручную и нажмите «Включить» ещё раз", failed.join(", ")));
+    }
+    if !killed.is_empty() { std::thread::sleep(Duration::from_millis(800)); }
     // 26.09 (владелец: «приложение врёт»): «Подключено» - только когда через туннель реально открылся внешний сайт.
     // Путь не пропускает трафик - сами пробуем следующий (порядок путей от сервера = выбор центра диагностики для
     // провайдера), системный прокси ставим только на проверенный путь. Не прошёл ни один - честная ошибка.
@@ -1393,8 +1407,6 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         let inner = dir.join("awg-inner.conf");
         let mut routed = false;
         if AWG_ROUTER && inner.exists() {
-            let _ = ensure_geo(&app, &dir).await;      // geosite/geoip для российского мимо туннеля (без них - только по зонам)
-            fetch_ad_hosts(&client, &dir).await;       // 30.09: хосты показа рекламы - напрямую / Hetzner - туннель (список сервера)
             launch(&app, "wireproxy", vec!["-c".into(), inner.to_string_lossy().to_string()], &dir)?;
             match launch_router(&app, &dir) {
                 Ok(()) => routed = true,
@@ -1417,7 +1429,12 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
     }
     if !is_awg {
-        let cands = xray_candidates(&app, &client, &url, offline, &choice, &dir, &last).await?;
+        let cands = match prepared_candidates {
+            Some(cands) => cands,
+            // AWG already had a complete configuration before teardown. Only
+            // fetch the alternative if that connection actually failed.
+            None => xray_candidates(&app, &client, &url, offline, &choice, &dir, &last).await?,
+        };
         let path = dir.join("config.json");
         let total = cands.len();
         let mut ok_cfg: Option<Vec<u8>> = None;
