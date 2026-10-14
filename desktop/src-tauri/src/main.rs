@@ -385,12 +385,23 @@ async fn splash_report(app: AppHandle, why: String, secs: u64) -> bool {
 
 #[tauri::command]
 async fn server_ok() -> bool {
-    for direct in [true, false] {
-        let b = reqwest::Client::builder().timeout(Duration::from_secs(5));
-        let b = if direct { b.no_proxy() } else { b };
-        let Ok(c) = b.build() else { continue };
-        if let Ok(r) = c.get(format!("{BASE}/health?wd={}", now_ms())).send().await {
-            if r.status().is_success() && r.text().await.map(|t| t.contains("ok")).unwrap_or(false) { return true; }
+    // 15.10 (владелец): на сетях, где основной адрес душится (Tele2), пробуем запасной
+    // n2.insellers.su (NL-2). У него нет /health, поэтому проверяем /api/app/failure:
+    // любой HTTP-ответ (не 5xx) означает, что наш край и бэкенд доступны.
+    for alt in [false, true] {
+        let base = if alt { BASE_ALT } else { BASE };
+        for direct in [true, false] {
+            let mut b = reqwest::Client::builder().timeout(Duration::from_secs(5));
+            if direct { b = b.no_proxy(); }
+            let Ok(c) = b.build() else { continue };
+            let url = if alt { format!("{base}/api/app/failure") } else { format!("{base}/health?wd={}", now_ms()) };
+            if let Ok(r) = c.get(url).send().await {
+                if !alt {
+                    if r.status().is_success() && r.text().await.map(|t| t.contains("ok")).unwrap_or(false) { return true; }
+                } else if !r.status().is_server_error() {
+                    return true;
+                }
+            }
         }
     }
     false
