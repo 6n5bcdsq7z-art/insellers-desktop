@@ -1439,6 +1439,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         let total = cands.len();
         let mut ok_cfg: Option<Vec<u8>> = None;
         let mut soft: Option<(usize, String, String, Vec<u8>)> = None;   // прошёл 204, но не загрузку
+        let mut hard: Option<(usize, String, String, Vec<u8>)> = None;   // не прошёл даже 204
         let n_cands = cands.len();
         for (i, (tag, cfg)) in cands.into_iter().enumerate() {
             if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
@@ -1462,6 +1463,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                 if soft.is_none() { soft = Some((i, tag.clone(), desc.clone(), bytes.clone())); }
             } else {
                 crate::remote_log("vpn.path_dead", json!({"path": tag, "desc": desc, "try": i + 1, "reason": "no204", "stage": "start"}));
+                if hard.is_none() { hard = Some((i, tag.clone(), desc.clone(), bytes.clone())); }
             }
             mark_bad(&tag);
             kill_child(&app);
@@ -1478,6 +1480,16 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                     set_cur_path(&tag); set_cur_desc(&desc);
                     ok_cfg = Some(bytes);
                 } else { kill_child(&app); }
+            } else if let Some((i, tag, desc, bytes)) = hard {
+                // 15.10 (владелец, Теле2): проверка 204 может не проходить из-за DPI/ТСПУ, хотя сам
+                // туннель жив. Ни один путь не прошёл 204 - подключаемся по первому без перепроверки:
+                // жив ли он, дальше проверит сторож по трафику и переключит при необходимости.
+                if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
+                std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+                launch(&app, "xray", vec!["run".into(), "-c".into(), path.to_string_lossy().to_string()], &dir)?;
+                crate::remote_log("vpn.path_ok", json!({"path": tag, "desc": desc, "try": i + 1, "how": "besteffort", "of": n_cands}));
+                set_cur_path(&tag); set_cur_desc(&desc);
+                ok_cfg = Some(bytes);
             }
         }
         match ok_cfg {

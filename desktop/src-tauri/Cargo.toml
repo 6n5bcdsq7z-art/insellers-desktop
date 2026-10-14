@@ -39,6 +39,11 @@ webpki-roots = "1"
 zstd = { version = "0.13", features = ["experimental"] }
 flate2 = "1"
 
+# tauri-plugin-deep-link 2.6.2 constructs the two-field ParseOption.
+# rust-ini 0.21.3 adds required fields and breaks its Linux compilation.
+[target.'cfg(target_os = "linux")'.dependencies]
+rust-ini = "=0.21.1"
+
 [profile.release]
 codegen-units = 1
 lto = true
