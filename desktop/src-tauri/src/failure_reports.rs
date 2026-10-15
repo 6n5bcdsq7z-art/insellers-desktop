@@ -30,11 +30,17 @@ pub async fn flush() -> bool {
     let token=if entry["owner"]==owner("") {String::new()} else {crate::load_token()};
     if entry["owner"].as_str()!=Some(owner(&token).as_str()) {return false}
     let body=&entry["body"];
-    // These IPs are also physical-route exceptions in tun::bypass_ips; no system proxy.
-    for (base,host,ip) in [(crate::BASE,"vpn.insellers.su","46.224.14.67"),(crate::BASE_ALT,"n2.insellers.su","212.34.151.212")] {
-        let Ok(addr)=format!("{ip}:443").parse() else {continue};
-        let Ok(client)=reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
-            .resolve(host,addr).connect_timeout(std::time::Duration::from_secs(5)).timeout(std::time::Duration::from_secs(12)).build() else {continue};
+    // The primary website follows its current DNS entry. Pinning the former
+    // Hetzner address bypassed the recovered public ingress and broke reports.
+    // Keep an independent pinned backup for DNS failures, with TLS verification.
+    for (base,backup) in [(crate::BASE,None),(crate::BASE_ALT,Some(("n2.insellers.su","212.34.151.212")))] {
+        let mut builder=reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(std::time::Duration::from_secs(5)).timeout(std::time::Duration::from_secs(12));
+        if let Some((host,ip))=backup {
+            let Ok(addr)=format!("{ip}:443").parse() else {continue};
+            builder=builder.resolve(host,addr);
+        }
+        let Ok(client)=builder.build() else {continue};
         let mut request=client.post(format!("{base}/api/app/failure")).json(body);
         if !token.is_empty(){request=request.header("X-App-Token",&token);}
         let Ok(response)=request.send().await else {continue};
