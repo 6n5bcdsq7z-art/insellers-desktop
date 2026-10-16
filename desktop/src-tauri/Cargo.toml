@@ -9,7 +9,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # 30.09: >= 2.11 - при падении процесса WebKit (webViewWebContentProcessDidTerminate) Tauri сам перезагружает страницу
 tauri = { version = "2.11", features = ["tray-icon", "image-png", "macos-proxy"] }   # 30.09: macos-proxy - прокси окна (запасной путь страницы, macOS 14+)
-tauri-plugin-updater = "2"
+# We publish raw NSIS/AppImage and macOS tar.gz, never Windows/Linux ZIP archives.
+# Disable the optional ZIP reader: upstream zip 2/4 were withdrawn on 2026-10-16.
+# Keep TLS, system proxy behavior, macOS tar support and signature verification.
+tauri-plugin-updater = { version = "=2.14.0", default-features = false, features = ["rustls-tls", "system-proxy"] }
 tauri-plugin-process = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"
