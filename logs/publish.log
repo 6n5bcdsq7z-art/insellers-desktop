@@ -1,1 +1,67 @@
-no log
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100   430  100    22  100   408     32    605 --:--:-- --:--:-- --:--:--   638
+  http=200 time=0.673446s speed=605B/s
+{"ok":true,"size":408}
+  0 69.1M    0     0    0  256k      0   249k  0:04:43  0:00:01  0:04:42  250k  0 68.3M    0     0    0  256k      0   249k  0:04:39  0:00:01  0:04:38  250k  0 36.4M    0     0    0  256k      0   250k  0:02:29  0:00:01  0:02:28  250k  0 25.2M    0     0    0  256k      0   248k  0:01:43  0:00:01  0:01:42  248k  0  107M    0     0    0  256k      0   248k  0:07:22  0:00:01  0:07:21  249k 12 69.1M    0     0   12 8576k      0  4443k  0:00:15  0:00:01  0:00:14 4443k  9 68.3M    0     0    9 6656k      0  3445k  0:00:20  0:00:01  0:00:19 3445k 18 36.4M    0     0   18 6784k      0  3513k  0:00:10  0:00:01  0:00:09 3513k 32 25.2M    0     0   32 8448k      0  4335k  0:00:05  0:00:01  0:00:04 4334k  7  107M    0     0    7 8320k      0  4275k  0:00:25  0:00:01  0:00:24 4275k 64 36.4M    0     0   64 23.6M      0  8312k  0:00:04  0:00:02  0:00:02 8309k 42 69.1M    0     0   42 29.1M      0   9.8M  0:00:07  0:00:02  0:00:05  9.8M 26  107M    0     0   26 28.0M      0  9610k  0:00:11  0:00:02  0:00:09 9610k 97 25.2M    0     0   97 24.5M      0  8358k  0:00:03  0:00:03 --:--:-- 8358k 30 68.3M    0     0   30 20.6M      0  7017k  0:00:09  0:00:03  0:00:06 7019k100 25.2M  100    27  100 25.2M      8  7683k  0:00:03  0:00:03 --:--:-- 7684k
+  http=200 time=3.361810s speed=7867505B/s
+{"ok":true,"size":26449058}
+ 42  107M    0     0   42 46.0M      0  11.7M  0:00:09  0:00:03  0:00:06 11.7M 45 68.3M    0     0   45 30.8M      0  8026k  0:00:08  0:00:03  0:00:05 8026k 72 69.1M    0     0   72 49.8M      0  12.4M  0:00:05  0:00:04  0:00:01 12.4M100 36.4M  100    27  100 36.4M      6  8933k  0:00:04  0:00:04 --:--:-- 8934k100 36.4M  100    27  100 36.4M      6  8933k  0:00:04  0:00:04 --:--:-- 8934k
+  http=200 time=4.178512s speed=9147668B/s
+{"ok":true,"size":38223642}
+ 98 69.1M    0     0   98 68.1M      0  13.8M  0:00:04  0:00:04 --:--:-- 13.8M 61  107M    0     0   61 66.5M      0  13.4M  0:00:07  0:00:04  0:00:03 13.4M 62 68.3M    0     0   62 42.8M      0  8791k  0:00:07  0:00:04  0:00:03 8790k100 69.1M  100    27  100 69.1M      5  13.5M  0:00:05  0:00:05 --:--:-- 16.9M
+  http=200 time=5.090855s speed=14245726B/s
+{"ok":true,"size":72522926}
+ 79 68.3M    0     0   79 54.0M      0  9367k  0:00:07  0:00:05  0:00:02 11.0M 80  107M    0     0   80 87.0M      0  14.5M  0:00:07  0:00:05  0:00:02 17.5M 97 68.3M    0     0   97 66.6M      0  9854k  0:00:07  0:00:06  0:00:01 12.0M 97  107M    0     0   97  105M      0  15.0M  0:00:07  0:00:06  0:00:01 19.3M100 68.3M  100    27  100 68.3M      3  9422k  0:00:09  0:00:07  0:00:02 10.8M
+  http=200 time=7.425002s speed=9648383B/s
+{"ok":true,"size":71639270}
+100  107M  100    28  100  107M      3  14.0M  0:00:09  0:00:07  0:00:02 17.0M
+  http=200 time=7.665235s speed=14710747B/s
+{"ok":true,"size":112761336}
+upload INSELLERS-VPN-setup.exe (26M)
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  0 25.2M    0     0    0  256k      0   248k  0:01:43  0:00:01  0:01:42  248k 32 25.2M    0     0   32 8448k      0  4335k  0:00:05  0:00:01  0:00:04 4334k 97 25.2M    0     0   97 24.5M      0  8358k  0:00:03  0:00:03 --:--:-- 8358k100 25.2M  100    27  100 25.2M      8  7683k  0:00:03  0:00:03 --:--:-- 7684k
+  http=200 time=3.361810s speed=7867505B/s
+{"ok":true,"size":26449058}
+upload INSELLERS-VPN.dmg (69M)
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  0 68.3M    0     0    0  256k      0   249k  0:04:39  0:00:01  0:04:38  250k  9 68.3M    0     0    9 6656k      0  3445k  0:00:20  0:00:01  0:00:19 3445k 30 68.3M    0     0   30 20.6M      0  7017k  0:00:09  0:00:03  0:00:06 7019k 45 68.3M    0     0   45 30.8M      0  8026k  0:00:08  0:00:03  0:00:05 8026k 62 68.3M    0     0   62 42.8M      0  8791k  0:00:07  0:00:04  0:00:03 8790k 79 68.3M    0     0   79 54.0M      0  9367k  0:00:07  0:00:05  0:00:02 11.0M 97 68.3M    0     0   97 66.6M      0  9854k  0:00:07  0:00:06  0:00:01 12.0M100 68.3M  100    27  100 68.3M      3  9422k  0:00:09  0:00:07  0:00:02 10.8M
+  http=200 time=7.425002s speed=9648383B/s
+{"ok":true,"size":71639270}
+upload INSELLERS-VPN-mac.app.tar.gz (70M)
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  0 69.1M    0     0    0  256k      0   249k  0:04:43  0:00:01  0:04:42  250k 12 69.1M    0     0   12 8576k      0  4443k  0:00:15  0:00:01  0:00:14 4443k 42 69.1M    0     0   42 29.1M      0   9.8M  0:00:07  0:00:02  0:00:05  9.8M 72 69.1M    0     0   72 49.8M      0  12.4M  0:00:05  0:00:04  0:00:01 12.4M 98 69.1M    0     0   98 68.1M      0  13.8M  0:00:04  0:00:04 --:--:-- 13.8M100 69.1M  100    27  100 69.1M      5  13.5M  0:00:05  0:00:05 --:--:-- 16.9M
+  http=200 time=5.090855s speed=14245726B/s
+{"ok":true,"size":72522926}
+upload INSELLERS-VPN.AppImage (108M)
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  0  107M    0     0    0  256k      0   248k  0:07:22  0:00:01  0:07:21  249k  7  107M    0     0    7 8320k      0  4275k  0:00:25  0:00:01  0:00:24 4275k 26  107M    0     0   26 28.0M      0  9610k  0:00:11  0:00:02  0:00:09 9610k 42  107M    0     0   42 46.0M      0  11.7M  0:00:09  0:00:03  0:00:06 11.7M 61  107M    0     0   61 66.5M      0  13.4M  0:00:07  0:00:04  0:00:03 13.4M 80  107M    0     0   80 87.0M      0  14.5M  0:00:07  0:00:05  0:00:02 17.5M 97  107M    0     0   97  105M      0  15.0M  0:00:07  0:00:06  0:00:01 19.3M100  107M  100    28  100  107M      3  14.0M  0:00:09  0:00:07  0:00:02 17.0M
+  http=200 time=7.665235s speed=14710747B/s
+{"ok":true,"size":112761336}
+upload INSELLERS-VPN.deb (37M)
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  0 36.4M    0     0    0  256k      0   250k  0:02:29  0:00:01  0:02:28  250k 18 36.4M    0     0   18 6784k      0  3513k  0:00:10  0:00:01  0:00:09 3513k 64 36.4M    0     0   64 23.6M      0  8312k  0:00:04  0:00:02  0:00:02 8309k100 36.4M  100    27  100 36.4M      6  8933k  0:00:04  0:00:04 --:--:-- 8934k100 36.4M  100    27  100 36.4M      6  8933k  0:00:04  0:00:04 --:--:-- 8934k
+  http=200 time=4.178512s speed=9147668B/s
+{"ok":true,"size":38223642}
+upload INSELLERS-VPN-mac.app.tar.sig (4.0K)
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100   430  100    22  100   408     32    605 --:--:-- --:--:-- --:--:--   638
+  http=200 time=0.673446s speed=605B/s
+{"ok":true,"size":408}
+candidate 1.0.163 (людям не опубликовано)
