@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	Version = "2" // 02.10: down требует ключ; ключ 600
+	Version = "3" // Shared web ingress must reach core before the server-IP bypass.
 	Listen  = "127.0.0.1:38811"
 )
 
@@ -122,10 +122,16 @@ func config(socks int, bypass []string, dns string) ([]byte, error) {
 				// само ядро и помощник - мимо TUN (иначе петля): ядро ходит к серверам и «напрямую» (RU-сайты) с физической сети
 				map[string]any{"process_name": []string{"xray", "xray.exe", "wireproxy", "wireproxy.exe", "ins-helper", "ins-helper.exe"},
 					"outbound": "direct"},
-				map[string]any{"ip_cidr": cidr, "outbound": "direct"},
-				// IPv6 наружу не выпускаем: сервер его не отдаёт, мимо туннеля - утечка
+				// Keep IPv6 rejection and local-network access ahead of web exceptions.
 				map[string]any{"ip_version": 6, "action": "reject"},
 				map[string]any{"ip_is_private": true, "outbound": "direct"},
+				// Websites share an IP with VPN endpoints. Send their sniffed names
+				// through core; keep core processes and endpoint connections direct.
+				// Exact names only: a suffix rule would capture direct/n2 and loop.
+				map[string]any{"domain": []string{"insellers.su", "vpn.insellers.su", "cdn.insellers.su",
+					"bot.insellers.su", "elcode.insellers.su", "hochu.insellers.su", "sub.insellers.su"},
+					"action": "route", "outbound": "core"},
+				map[string]any{"ip_cidr": cidr, "outbound": "direct"},
 			},
 			"final": "core",
 		},

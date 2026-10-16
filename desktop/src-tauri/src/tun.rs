@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-pub const HELPER_VERSION: &str = "2";   // 02.10: ключ 600 + down с ключом - переустановка помощника (один запрос пароля)
+pub const HELPER_VERSION: &str = "3";   // Shared web ingress must reach core before the server-IP bypass.
 const HELPER_ADDR: &str = "127.0.0.1:38811";
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static BYPASS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
