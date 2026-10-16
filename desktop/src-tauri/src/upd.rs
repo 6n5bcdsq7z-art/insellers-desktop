@@ -235,9 +235,7 @@ pub mod delta {
             Ok((tar, tgz))
         }).await.ok()?;
         match res {
-            Ok((tar, tgz)) => {
-                let ver = dj["version"].as_str().unwrap_or("").to_string();
-                let _ = tauri::async_runtime::spawn_blocking(move || save_base_tar(&tar, &ver)).await;
+            Ok((_, tgz)) => {
                 crate::remote_log("update.delta_ok", serde_json::json!({"from": base_ver, "patch_kb": plen / 1024,
                     "ms": t0.elapsed().as_millis() as u64}));
                 Some(tgz)

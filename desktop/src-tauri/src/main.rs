@@ -1125,16 +1125,16 @@ async fn check_update(app: AppHandle, manual: Option<bool>) -> Result<bool, Stri
                     if let Err(e) = upd::verify(&b, &update.signature, &pubkey) {
                         emit(0, "error"); remote_log("update.fail", serde_json::json!({"err": e})); return Err(e);
                     }
-                    // база для следующего дельта-обновления (распакованный tar этой версии)
-                    #[cfg(target_os = "macos")]
-                    {
-                        let (bc, v) = (b.clone(), update.version.clone());
-                        let _ = tauri::async_runtime::spawn_blocking(move || upd::delta::save_base_from_tgz(&bc, &v)).await;
-                    }
                     b
                 };
                 emit(100, "install");
                 if let Err(e) = update.install(&bytes) { emit(0, "error"); return Err(e.to_string()); }
+                // база для следующего дельта-обновления — только после успешной установки этой версии
+                #[cfg(target_os = "macos")]
+                {
+                    let (bc, v) = (bytes.clone(), update.version.clone());
+                    let _ = tauri::async_runtime::spawn_blocking(move || upd::delta::save_base_from_tgz(&bc, &v)).await;
+                }
                 if was_on { if let Some(p) = data_path("resume") { let _ = std::fs::write(p, "1"); } }
                 vpn::stop(&app);
                 app.restart();
