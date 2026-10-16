@@ -1128,7 +1128,12 @@ async fn check_update(app: AppHandle, manual: Option<bool>) -> Result<bool, Stri
                     b
                 };
                 emit(100, "install");
-                if let Err(e) = update.install(&bytes) { emit(0, "error"); return Err(e.to_string()); }
+                if let Err(e) = update.install(&bytes) {
+                    // причина сбоя установки нужна в журнале - раньше терялась (видели только «error 0»)
+                    remote_log("update.install_fail", serde_json::json!({"err": e.to_string()}));
+                    emit(0, "error");
+                    return Err(e.to_string());
+                }
                 // база для следующего дельта-обновления — только после успешной установки этой версии
                 #[cfg(target_os = "macos")]
                 {
