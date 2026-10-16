@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	Version = "4" // Core DNS must bypass interception to avoid feeding itself.
+	Version = "5" // Include the full public Hochutusit hostname before endpoint bypass.
 	Listen  = "127.0.0.1:38811"
 )
 
@@ -131,7 +131,7 @@ func config(socks int, bypass []string, dns string) ([]byte, error) {
 				// through core; keep core processes and endpoint connections direct.
 				// Exact names only: a suffix rule would capture direct/n2 and loop.
 				map[string]any{"domain": []string{"insellers.su", "vpn.insellers.su", "cdn.insellers.su",
-					"bot.insellers.su", "elcode.insellers.su", "hochu.insellers.su", "sub.insellers.su"},
+					"bot.insellers.su", "elcode.insellers.su", "hochu.insellers.su", "hochutusit.insellers.su", "sub.insellers.su"},
 					"action": "route", "outbound": "core"},
 				map[string]any{"ip_cidr": cidr, "outbound": "direct"},
 			},

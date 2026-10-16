@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-pub const HELPER_VERSION: &str = "4";   // Core DNS must bypass interception to avoid feeding itself.
+pub const HELPER_VERSION: &str = "5";   // Full public Hochutusit hostname must precede endpoint bypass.
 const HELPER_ADDR: &str = "127.0.0.1:38811";
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static BYPASS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());

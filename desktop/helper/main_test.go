@@ -104,7 +104,7 @@ func TestSharedIngressPreservesSitesAndEndpointSafety(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, host := range []string{"insellers.su", "vpn.insellers.su", "cdn.insellers.su", "bot.insellers.su", "elcode.insellers.su", "hochu.insellers.su", "sub.insellers.su"} {
+		for _, host := range []string{"insellers.su", "vpn.insellers.su", "cdn.insellers.su", "bot.insellers.su", "elcode.insellers.su", "hochu.insellers.su", "hochutusit.insellers.su", "sub.insellers.su"} {
 			if got := testRoute(t, raw, host, "2606:4700:4700::1111", "curl"); got != "reject" {
 				t.Errorf("IPv6 guard bypassed for %s: %s", host, got)
 			}
