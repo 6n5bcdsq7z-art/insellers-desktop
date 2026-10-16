@@ -10,7 +10,7 @@ import (
 
 // Evaluate routing predicates for traffic already identified by sniffing.
 // Runtime sing-box replay separately verifies that TLS supplies this name.
-func testRoute(t *testing.T, raw []byte, domain, ip, process string) string {
+func testRoute(t *testing.T, raw []byte, domain, ip, process string, protocol ...string) string {
 	t.Helper()
 	var c struct {
 		Route struct {
@@ -40,7 +40,10 @@ func testRoute(t *testing.T, raw []byte, domain, ip, process string) string {
 	}
 	addr := net.ParseIP(ip)
 	for _, r := range c.Route.Rules {
-		if r.Action == "sniff" || r.Protocol != "" {
+		if r.Action == "sniff" {
+			continue
+		}
+		if r.Protocol != "" && (len(protocol) == 0 || r.Protocol != protocol[0]) {
 			continue
 		}
 		if len(r.Domain) > 0 && !contains(r.Domain, domain) {
@@ -73,6 +76,26 @@ func testRoute(t *testing.T, raw []byte, domain, ip, process string) string {
 		return r.Outbound
 	}
 	return c.Route.Final
+}
+
+func TestCoreDNSDoesNotReenterResolver(t *testing.T) {
+	for _, dns := range []string{"udp", "tcp"} {
+		raw, err := config(38808, []string{"212.34.151.212"}, dns)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, process := range []string{"xray", "xray.exe", "wireproxy", "wireproxy.exe", "ins-helper", "ins-helper.exe"} {
+			if got := testRoute(t, raw, "yandex.ru", "77.88.8.8", process, "dns"); got != "direct" {
+				t.Errorf("%s resolver request loops through %s", process, got)
+			}
+		}
+		// Other processes still use the configured resolver and its filters.
+		for _, ip := range []string{"77.88.8.8", "1.1.1.1", "192.168.1.1"} {
+			if got := testRoute(t, raw, "example.com", ip, "browser", "dns"); got != "hijack-dns" {
+				t.Errorf("application DNS to %s escaped interception: %s", ip, got)
+			}
+		}
+	}
 }
 
 func TestSharedIngressPreservesSitesAndEndpointSafety(t *testing.T) {

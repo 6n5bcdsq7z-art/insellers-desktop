@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	Version = "3" // Shared web ingress must reach core before the server-IP bypass.
+	Version = "4" // Core DNS must bypass interception to avoid feeding itself.
 	Listen  = "127.0.0.1:38811"
 )
 
@@ -118,10 +118,12 @@ func config(socks int, bypass []string, dns string) ([]byte, error) {
 			"auto_detect_interface": true,
 			"rules": []any{
 				map[string]any{"action": "sniff"},
-				map[string]any{"protocol": "dns", "action": "hijack-dns"},
 				// само ядро и помощник - мимо TUN (иначе петля): ядро ходит к серверам и «напрямую» (RU-сайты) с физической сети
+				// This must precede DNS hijacking too: Xray's domestic DNS requests
+				// otherwise return to its own DNS module through core.
 				map[string]any{"process_name": []string{"xray", "xray.exe", "wireproxy", "wireproxy.exe", "ins-helper", "ins-helper.exe"},
 					"outbound": "direct"},
+				map[string]any{"protocol": "dns", "action": "hijack-dns"},
 				// Keep IPv6 rejection and local-network access ahead of web exceptions.
 				map[string]any{"ip_version": 6, "action": "reject"},
 				map[string]any{"ip_is_private": true, "outbound": "direct"},
