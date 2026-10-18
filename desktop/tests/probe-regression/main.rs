@@ -1,3 +1,6 @@
+#[path = "../../src-tauri/src/private_file.rs"]
+mod private_file;
+mod manual_selection;
 include!(concat!(env!("OUT_DIR"), "/helper.rs"));
 include!(concat!(env!("OUT_DIR"), "/variants.rs"));
 use tokio::io::{AsyncReadExt,AsyncWriteExt};
@@ -15,6 +18,7 @@ async fn sequence(responses:Vec<(u16,usize)>)->u16 {
 }
 #[tokio::main]
 async fn main(){
+ manual_selection::run();
  for status in [401,403,404,500,502] {let p=mock(status,262144,false).await;let (_,n,e)=get_via(p,"http://probe.invalid/128k",131072,2).await;assert_eq!(n,0,"error body must not count");assert_eq!(e,format!("http {status}"));println!("PASS large HTTP {status} rejected before byte limit");}
  for (status,size,max) in [(204,0,1024),(200,131072,131072),(200,2048,1024)] {let p=mock(status,size,false).await;let (_,n,e)=get_via(p,"http://probe.invalid/test",max,2).await;assert!(e.is_empty(),"{e}");assert!(n>=max||status==204);println!("PASS valid {status} {size} bytes");}
  let p=mock(200,64,false).await;let (_,n,e)=get_via(p,"http://probe.invalid/128k",131072,2).await;assert!(e.is_empty()&&n<131072);println!("PASS short payload retains size for caller rejection");

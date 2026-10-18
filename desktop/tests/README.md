@@ -27,6 +27,14 @@ changed. The bridge fixture contains synthetic credentials. Private-file tests
 write only temporary files. Linux tests do not replace Windows/macOS builds,
 WebView/device tests, signed release checks or validation of Windows ACLs.
 
+The probe harness also compiles the actual manual protocol picker and private
+cache helpers from `vpn.rs`. It checks missing protocols, gRPC/REALITY distinction,
+account/subscription/choice binding, cache age, malformed and legacy cache data,
+and preservation of the last valid cache on invalid input. Legacy unbound caches
+require one successful subscription fetch before offline reuse. The separate
+`compile` CI job checks the complete Desktop Rust application with compile-only
+sidecar/icon/frontend placeholders; it neither runs nor publishes a client.
+
 With Playwright and Chromium installed, use the actual Rust-generated bridge
 fixture above for browser-frame checks:
 

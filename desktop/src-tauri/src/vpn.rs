@@ -179,8 +179,6 @@ fn mark(app: &AppHandle, kind: u8) {
 
 /// Один запуск подключения за раз: повторное нажатие / трей / автоподключение не плодят второй Xray.
 /// До какого времени (мс) ручной протокол заменён «Автовыбором» (ручной путь не пропускал трафик). 0 - не заменён.
-static TEMP_AUTO_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-fn manual_name(c: &str) -> &'static str { match c { "reality" => "Быстрый", "xhttp" => "Стабильный", "hysteria2" => "Для Wi-Fi", _ => "выбранная конфигурация" } }
 static STARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 struct StartGuard;
 impl Drop for StartGuard { fn drop(&mut self) { STARTING.store(false, std::sync::atomic::Ordering::SeqCst); } }
@@ -346,19 +344,13 @@ fn awg_text(v: &Value) -> Result<String, String> {
     Ok(t)
 }
 
-async fn transport_choice(client: &reqwest::Client, token: &str) -> String {
-    let r = client.get(format!("{}/api/transport", crate::BASE)).header("X-App-Token", token).timeout(Duration::from_secs(8)).send().await;
-    match r {
-        // режим продления (26.09): сервер отдаёт grace=true - AmneziaWG в нём не пускается, берём Xray «только Telegram»
-        // (как при «Автовыборе»); после ролика/оплаты grace=false - при следующем подключении снова выбранный протокол
-        Ok(r) => r.json::<Value>().await.ok().map(|v| {
-            // 27.09 (tasks/0000b): «Автовыбор» = то, что предлагает сервер (effective: AmneziaWG у всех, кроме операторов, где он
-            // массово не работает); AmneziaWG и в ограниченном режиме - «только Telegram» для него держит сервер
-            let c = v["choice"].as_str().unwrap_or("").to_string();
-            if (c.is_empty() || c == "auto") && v["effective"].as_str() == Some("amneziawg") { "amneziawg".to_string() } else { c }
-        }).unwrap_or_default(),
-        Err(_) => String::new(),
-    }
+async fn transport_choice(client: &reqwest::Client, token: &str) -> Result<String, String> {
+    let error = || "Не удалось получить выбранный протокол. Повторите подключение".to_string();
+    let response = client.get(format!("{}/api/transport", crate::BASE)).header("X-App-Token", token)
+        .timeout(Duration::from_secs(8)).send().await.map_err(|_| error())?;
+    if !response.status().is_success() { return Err(error()); }
+    let value = response.json::<Value>().await.map_err(|_| error())?;
+    value["choice"].as_str().map(str::to_owned).ok_or_else(error)
 }
 
 fn is_hy(o: &Value) -> bool {
@@ -389,16 +381,15 @@ fn pick_config(raw: Value, choice: &str) -> Value {
         match choice {
             "hysteria2" => is_hy(o),
             "xhttp" => is_proxy(o) && net_of(o) == "xhttp",
-            "reality" => is_proxy(o) && net_of(o) != "xhttp",
+            "reality" => is_proxy(o) && ["", "tcp", "raw"].contains(&net_of(o).as_str()),
             _ => false,   // «Автовыбор»: путь решает сервер — берём его первый выход как есть (25.09)
         }
     };
     let outs = |c: &Value| -> Vec<Value> { c["outbounds"].as_array().cloned().unwrap_or_default() };
-    let idx = list.iter().position(|c| outs(c).iter().any(|o| want(o)))
-        .or_else(|| list.iter().position(|c| outs(c).iter().any(is_proxy)));
-    let mut c = match idx { Some(i) => list[i].clone(), None => return list[0].clone() };
+    let idx = list.iter().position(|c| outs(c).iter().any(|o| want(o)));
+    let mut c = match idx { Some(i) => list[i].clone(), None => return Value::Null };
     let all = outs(&c);
-    let main = match all.iter().find(|o| want(o)).or_else(|| all.iter().find(|o| is_proxy(o))) { Some(m) => m.clone(), None => return c };
+    let main = match all.iter().find(|o| want(o)) { Some(m) => m.clone(), None => return Value::Null };
     let tag = main["tag"].as_str().unwrap_or("").to_string();
     let others: Vec<String> = all.iter().filter(|o| (is_proxy(o) || is_hy(o)) && **o != main)
         .map(|o| o["tag"].as_str().unwrap_or("").to_string()).collect();
@@ -471,6 +462,35 @@ fn fresh_last(p: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+// These files contain private subscription credentials, just like the existing token/config files.
+fn cache_matches(value: &Value, account: &str, url: &str, choice: &str) -> bool {
+    !account.is_empty() && value["account"].as_str() == Some(account)
+        && value["url"].as_str() == Some(url) && value["choice"].as_str() == Some(choice)
+}
+fn read_selection(dir: &std::path::Path, account: &str) -> Option<(String, String)> {
+    if account.is_empty() { return None; }
+    let value: Value = serde_json::from_slice(&std::fs::read(dir.join("selection.json")).ok()?).ok()?;
+    if value["account"].as_str()? != account { return None; }
+    let url = value["url"].as_str()?;
+    if !url.starts_with("https://") { return None; }
+    Some((url.to_owned(), value["choice"].as_str()?.to_owned()))
+}
+fn write_selection(dir: &std::path::Path, account: &str, url: &str, choice: &str) -> bool {
+    crate::private_file::write_private_bytes(&dir.join("selection.json"),
+        json!({"account":account,"url":url,"choice":choice}).to_string().as_bytes())
+}
+fn cached_profile(last: &std::path::Path, account: &str, url: &str, choice: &str) -> Option<Value> {
+    if !fresh_last(last) { return None; }
+    let value: Value = serde_json::from_slice(&std::fs::read(last).ok()?).ok()?;
+    if !cache_matches(&value, account, url, choice) || !value["config"].is_object() { return None; }
+    Some(value["config"].clone())
+}
+fn save_profile(last: &std::path::Path, bytes: &[u8], account: &str, url: &str, choice: &str) -> bool {
+    let config: Value = match serde_json::from_slice(bytes) { Ok(v) => v, Err(_) => return false };
+    crate::private_file::write_private_bytes(last,
+        json!({"account":account,"url":url,"choice":choice,"config":config}).to_string().as_bytes())
+}
+
 /// Ссылка на подписку человека по токену входа.
 pub(crate) async fn sub_url(client: &reqwest::Client, token: &str) -> Result<String, String> {
     // 26.09: сразу после закрытия другого VPN (Happ в режиме TUN) сеть на Маке пару секунд «висит» - один запрос на 20 с
@@ -524,7 +544,7 @@ static HOT_CUR: Mutex<String> = Mutex::new(String::new());
 static HOT_BAD: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
 fn set_cur_desc(d: &str) { *CUR_DESC.lock().unwrap() = d.to_string(); }
 pub(crate) fn cur_desc() -> String { CUR_DESC.lock().unwrap().clone() }
-fn manual_choice(choice: &str) -> bool { choice == "reality" || choice == "xhttp" || choice == "hysteria2" || choice.starts_with("cfg:") }
+fn manual_choice(choice: &str) -> bool { choice == "amneziawg" || choice == "reality" || choice == "xhttp" || choice == "hysteria2" || choice.starts_with("cfg:") }
 
 /// Описание пути для центра диагностики: вид@адрес (xhttp@212.34.151.212); у балансировщика - "auto".
 fn path_desc(c: &Value) -> String {
@@ -586,7 +606,8 @@ fn hot_servers(cfg: &Value) -> std::collections::HashMap<String, String> {
     m
 }
 
-async fn hot_switch(app: &AppHandle, dir: &PathBuf, cur: &str) -> Option<String> {
+async fn hot_switch(app: &AppHandle, dir: &PathBuf, cur: &str, choice: &str) -> Option<String> {
+    if manual_choice(choice) { return None; }
     let cfg: Value = serde_json::from_slice(&std::fs::read(dir.join("config.json")).ok()?).ok()?;
     let bal = cfg.pointer("/routing/balancers/0/tag").and_then(|v| v.as_str())?.to_string();
     let mut tags: Vec<String> = cfg["outbounds"].as_array()?.iter()
@@ -643,7 +664,7 @@ async fn freeze_confirmed() -> bool {
     true
 }
 
-async fn freeze_watch(app: AppHandle, dir: PathBuf, gen: u32) {
+async fn freeze_watch(app: AppHandle, dir: PathBuf, gen: u32, choice: String) {
     let client = match reqwest::Client::builder().no_proxy().timeout(Duration::from_millis(800)).build() { Ok(c) => c, Err(_) => return };
     let url = format!("http://127.0.0.1:{METRICS_PORT}/debug/vars");
     let mut prev: Option<(u64, u64)> = None;
@@ -689,7 +710,7 @@ async fn freeze_watch(app: AppHandle, dir: PathBuf, gen: u32) {
             }
             hot_mark_bad(&cur, 120_000);
             let from = cur_desc();
-            if let Some(to) = hot_switch(&app, &dir, &cur).await {
+            if let Some(to) = hot_switch(&app, &dir, &cur, &choice).await {
                 *HOT_CUR.lock().unwrap() = to.clone();
                 crate::remote_log("vpn.hot_switch", crate::telemetry::switch_fields(json!({"from": from, "to": to, "how": "freeze",
                     "detect_ms": crate::now_ms().saturating_sub(t0), "gap_ms": crate::now_ms().saturating_sub(t0)}), "no_traffic"));
@@ -880,24 +901,24 @@ async fn subscription_endpoints(client: &reqwest::Client, urls: Vec<String>) -> 
 /// Кандидаты для подключения: сначала выбор человека (или «Автовыбор» сервера), потом каждый путь по одному
 /// в порядке сервера, без принудительного понижения hy2. Пути, упавшие за последние 30 минут, - в конец. Не больше 5.
 async fn xray_candidates(app: &AppHandle, client: &reqwest::Client, url: &str, offline: bool, choice: &str,
-                         dir: &PathBuf, last: &PathBuf) -> Result<Vec<(String, Value)>, String> {
+                         dir: &PathBuf, last: &PathBuf, token: &str) -> Result<Vec<(String, Value)>, String> {
     notify(app, "connecting", if offline { "Читаем сохранённую конфигурацию…" } else { "Получаем конфигурацию VPN…" });
     let mut raw_cands: Vec<Value> = Vec::new();
     // 29.09: свежая подписка, забранная через туннель (см. h_refresh), - вместо старой сохранённой конфигурации, до 2 ч
     let fresh = dir.join("sub.fresh.json");
     let fresh_ok = std::fs::metadata(&fresh).ok().and_then(|m| m.modified().ok())
         .map(|t| t.elapsed().map(|e| e.as_secs() < 2 * 3600).unwrap_or(false)).unwrap_or(false);
-    let fetched = if offline { if fresh_ok { std::fs::read_to_string(&fresh).ok() } else { None } } else {
+    let cached = cached_profile(last, token, url, choice);
+    let fetched = if offline {
+        if fresh_ok {
+            std::fs::read(&fresh).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                .filter(|v| cache_matches(v, token, url, choice))
+                .and_then(|v| v["text"].as_str().map(str::to_owned))
+        } else { None }
+    } else {
         match subscription_text(client, url).await {
-            // 27.09 (владелец): сервер (центр диагностики) видит, что ручной протокол у провайдера человека виснет (>= 50%) -
-            // сразу «Автовыбор» на 15 мин с объяснением; через 15 мин - снова спросим сервер (путь ожил - вернётся выбор)
-            Ok((_, true)) if manual_choice(choice) => {
-                TEMP_AUTO_UNTIL.store(crate::now_ms() + 15 * 60 * 1000, std::sync::atomic::Ordering::SeqCst);
-                crate::remote_log("vpn.manual_bad", json!({"manual": manual_name(choice)}));
-                return Err(format!("RETRY_AUTO_BAD:{}", manual_name(choice)));
-            }
-            Ok((text, _)) => Some(text),
-            Err(e) if e == "SUB_UNAVAILABLE" && fresh_last(last) => None,
+            Ok((text, _)) => Some(text), // quality advice never overrides an explicit choice
+            Err(e) if e == "SUB_UNAVAILABLE" && cached.is_some() => None,
             Err(e) if e == "SUB_UNAVAILABLE" => return Err("Не удалось получить конфигурацию через основной и резервный адрес. Проверьте сеть и повторите попытку".into()),
             Err(e) => return Err(e),
         }
@@ -907,7 +928,9 @@ async fn xray_candidates(app: &AppHandle, client: &reqwest::Client, url: &str, o
         let raw: Value = serde_json::from_str(&txt).map_err(|_| "Сервер ещё не отдаёт конфигурацию для приложения".to_string())?;
         let list: Vec<Value> = match raw.clone() { Value::Array(a) => a, v => vec![v] };
         // Preserve the server recommendation across all supported transports.
-        raw_cands.push(pick_config(raw, choice));
+        let selected = pick_config(raw, choice);
+        if selected.is_null() { return Err("Выбранный протокол отсутствует в подписке. Выберите другой протокол".into()); }
+        raw_cands.push(selected);
         // ручной выбор протокола - только он (26.09, владелец: при ручном выборе сами не переключаем, только сообщаем)
         for c in if manual_choice(choice) { &list[..0] } else { &list[..] } {
             for o in c["outbounds"].as_array().cloned().unwrap_or_default() {
@@ -916,8 +939,7 @@ async fn xray_candidates(app: &AppHandle, client: &reqwest::Client, url: &str, o
         }
         prepared = false;
     } else {
-        let b = std::fs::read(last).map_err(|_| "Нет связи с сервером".to_string())?;
-        raw_cands.push(serde_json::from_slice(&b).map_err(|_| "Нет связи с сервером".to_string())?);
+        raw_cands.push(cached.ok_or_else(|| "Нет сохранённой конфигурации для этого выбора. Повторите подключение при доступной подписке".to_string())?);
     }
     let geo = if prepared { true } else { ensure_geo(app, dir).await };
     let mut out: Vec<(String, Value)> = Vec::new();
@@ -1270,38 +1292,10 @@ pub fn stop(app: &AppHandle) {
     kill_own_xray(None);      // и «потерянные» Xray, если были
 }
 
-static CONNECT_MSG: Mutex<String> = Mutex::new(String::new());
-/// Сообщение последнего подключения (временный «Автовыбор» вместо ручного протокола) - один раз.
-pub fn take_connect_msg() -> String { std::mem::take(&mut *CONNECT_MSG.lock().unwrap()) }
+/// Kept for the bridge used by older shared web code; manual fallback no longer exists.
+pub fn take_connect_msg() -> String { String::new() }
 
-pub async fn start(app: AppHandle) -> Result<(), String> {
-    // 26.09 (владелец): ручной протокол не пропустил трафик при подключении - второй заход на временном «Автовыборе»
-    match start_once(app.clone()).await {
-        Err(e) if e.starts_with("RETRY_AUTO:") => {
-            let name = e.trim_start_matches("RETRY_AUTO:").to_string();
-            notify(&app, "connecting", "Связь слабая - пробуем другие пути…");
-            let r = start_once(app.clone()).await;
-            if r.is_ok() {
-                let m = format!("Выбранный протокол («{name}») сейчас не работает в Вашей сети - временно подключили через «Автовыбор»");
-                *CONNECT_MSG.lock().unwrap() = m.clone();   // кнопка «Подключить» (main.rs) покажет его вместо пустого
-                notify(&app, "connected", &m);
-            }
-            r
-        }
-        Err(e) if e.starts_with("RETRY_AUTO_BAD:") => {
-            let name = e.trim_start_matches("RETRY_AUTO_BAD:").to_string();
-            notify(&app, "connecting", "Подключаем через «Автовыбор»…");
-            let r = start_once(app.clone()).await;
-            if r.is_ok() {
-                let m = format!("Ваш выбор («{name}») не работает в этой сети - подключили через «Автовыбор»");
-                *CONNECT_MSG.lock().unwrap() = m.clone();
-                notify(&app, "connected", &m);
-            }
-            r
-        }
-        r => r,
-    }
-}
+pub async fn start(app: AppHandle) -> Result<(), String> { start_once(app).await }
 
 async fn start_once(app: AppHandle) -> Result<(), String> {
     if STARTING.swap(true, std::sync::atomic::Ordering::SeqCst) { return Err("BUSY".into()); }
@@ -1317,6 +1311,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     // 26.09: последняя рабочая конфигурация. Если наш сервер напрямую недоступен (сеть режет vpn.insellers.su или Мак
     // ещё не отошёл после закрытия другого VPN) - подключаемся по ней, а не пишем «Нет связи с сервером», пока Happ работает.
     let last = dir.join("config.last.json");
+    let saved_selection = read_selection(&dir, &token);
     // 1) ссылка на свою подписку (или гостевая - ограниченный режим до входа / пока подписки нет)
     notify(&app, "connecting", "Запрашиваем настройки доступа…");
     let bootstrap_started = std::time::Instant::now();
@@ -1324,8 +1319,8 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         let choice_client = client.clone(); let choice_token = token.clone();
         let choice_job = tauri::async_runtime::spawn(async move { transport_choice(&choice_client, &choice_token).await });
         let sub = sub_url(&client, &token).await;
-        (sub, choice_job.await.unwrap_or_default())
-    } else { (Err("guest".to_string()), String::new()) };
+        (sub, choice_job.await.unwrap_or_else(|_| Err("Не удалось получить выбранный протокол".into())))
+    } else { (Err("guest".to_string()), Ok(String::new())) };
     let (url, until) = if !token.is_empty() {
         match subscription {
             Ok(u) => (u, 0u64),
@@ -1341,23 +1336,30 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     };
     crate::remote_log("vpn.bootstrap", json!({"ms":bootstrap_started.elapsed().as_millis() as u64,"stage":"metadata"}));
     let offline = url.is_empty();   // сервер недоступен - едем по сохранённой конфигурации
+    // Without current choice metadata, a freshly fetched subscription could belong to a
+    // different choice. Use only an identity-bound cached profile until metadata recovers.
+    let cached_bootstrap = offline || requested_choice.is_err();
     if offline {
         notify(&app, "connecting", "Подключаемся…");   // 29.09: не пугаем - после подключения свежие настройки подтянутся через туннель
         crate::remote_log("vpn.cached_config", json!({}));
     }
-    let choice = if token.is_empty() || offline { String::new() } else { requested_choice };
-    // 26.09 (владелец): ручной протокол не пропускал трафик - ВРЕМЕННО «Автовыбор» (сервер по ?auto=1 отдаёт все пути),
-    // выбор человека не трогаем; через 15 мин снова пробуем его (проверка пути ниже переподключит)
-    let temp_auto = manual_choice(&choice) && crate::now_ms() < TEMP_AUTO_UNTIL.load(std::sync::atomic::Ordering::SeqCst);
-    let (choice, url) = if temp_auto && !url.is_empty() {
-        (String::new(), format!("{}{}auto=1", url, if url.contains('?') { "&" } else { "?" }))
-    } else { (choice, url) };
-    // Протокол выбирают на уровне аккаунта: «AmneziaWG» с телефона приходит и сюда. Не получили ключ AWG (нет доступа,
-    // лимит, сервер AWG недоступен) - подключаемся через Xray как при «Автовыборе», а не отказываем (26.09: раньше Мак
-    // переставал подключаться из-за выбора на телефоне)
-    // гость без входа (ограниченный режим) - тоже сначала AmneziaWG (27.09)
+    let url = if offline {
+        saved_selection.as_ref().map(|(u, _)| u.clone())
+            .ok_or_else(|| bootstrap_error("Нет сохранённых настроек выбранного протокола. Повторите подключение при доступной подписке".into()))?
+    } else { url };
+    let choice = if token.is_empty() { String::new() } else {
+        match requested_choice {
+            Ok(choice) => choice,
+            Err(error) => saved_selection.as_ref().filter(|(u, _)| *u == url).map(|(_, c)| c.clone())
+                .ok_or_else(|| bootstrap_error(error))?,
+        }
+    };
+    if !token.is_empty() && !write_selection(&dir, &token, &url, &choice) {
+        return Err(bootstrap_error("Не удалось сохранить выбранный протокол".into()));
+    }
+    // Explicit AWG is never silently replaced with Xray, including during its old cooldown.
     let guest_sub = if token.is_empty() { guest_sub0.clone() } else { None };
-    let awg_path = if (choice == "amneziawg" || guest_sub.is_some()) && !awg_off(&dir) && (!token.is_empty() || guest_sub.is_some()) {
+    let awg_path = if (choice == "amneziawg" || (guest_sub.is_some() && !awg_off(&dir))) && (!token.is_empty() || guest_sub.is_some()) {
         let got = if token.is_empty() { awg_conf_guest(&client, guest_sub.as_deref().unwrap_or("")).await } else { awg_conf(&client, &token).await };
         match got {
             Ok(conf) => {
@@ -1368,6 +1370,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                 Some(p)
             }
             Err(e) => {
+                if choice == "amneziawg" { return Err(bootstrap_error(e)); }
                 // нет доступа (402) / лимит устройств (409) - не отказ AWG: центр диагностики не должен штрафовать путь
                 let ev = if e.starts_with("Нет активной") || e.starts_with("Достигнут лимит") { "vpn.awg_unavailable" } else { "vpn.awg_fallback" };
                 crate::remote_log(ev, json!({"err": e})); None
@@ -1377,8 +1380,8 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     // Obtain usable configuration before disconnecting another working VPN.
     // A failed bootstrap must leave that connectivity path available.
     let prepared_candidates = if awg_path.is_none() {
-        Some(xray_candidates(&app, &client, &url, offline, &choice, &dir, &last).await
-            .map_err(|e| if e.starts_with("RETRY_AUTO_BAD:") { e } else { bootstrap_error(e) })?)
+        Some(xray_candidates(&app, &client, &url, cached_bootstrap, &choice, &dir, &last, &token).await
+            .map_err(bootstrap_error)?)
     } else { None };
     if awg_path.is_some() && AWG_ROUTER {
         let _ = ensure_geo(&app, &dir).await;
@@ -1422,6 +1425,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         if link_ok_within(15).await { is_awg = true; set_cur_path("awg"); }
         else {
             kill_child(&app);
+            if choice == "amneziawg" { return Err("AmneziaWG не отвечает. Выберите другой сервер или протокол".into()); }
             set_awg_off(&dir);
             crate::remote_log("vpn.awg_fallback", json!({"err": "no traffic at start"}));
             notify(&app, "connecting", "Связь слабая - пробуем другие пути…");
@@ -1433,7 +1437,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
             Some(cands) => cands,
             // AWG already had a complete configuration before teardown. Only
             // fetch the alternative if that connection actually failed.
-            None => xray_candidates(&app, &client, &url, offline, &choice, &dir, &last).await?,
+            None => xray_candidates(&app, &client, &url, cached_bootstrap, &choice, &dir, &last, &token).await?,
         };
         let path = dir.join("config.json");
         let total = cands.len();
@@ -1493,14 +1497,8 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
             }
         }
         match ok_cfg {
-            Some(b) => { if !token.is_empty() { let _ = std::fs::write(&last, &b); } }   // запасная копия - только проверенная
-            // 26.09 (владелец): ручной протокол не пропускает - временно «Автовыбор» (15 мин), выбор человека не трогаем
-            None if manual_choice(&choice) && !url.is_empty() => {
-                TEMP_AUTO_UNTIL.store(crate::now_ms() + 15 * 60 * 1000, std::sync::atomic::Ordering::SeqCst);
-                crate::remote_log("vpn.manual_fallback", json!({"manual": manual_name(&choice), "at": "connect"}));
-                return Err(format!("RETRY_AUTO:{}", manual_name(&choice)));
-            }
-            None if manual_choice(&choice) => return Err("Связь слабая - включите «Автовыбор» в настройках: он подберёт другой путь".into()),
+            Some(b) => { if !token.is_empty() { let _ = save_profile(&last, &b, &token, &url, &choice); } }   // запасная копия - только проверенная
+            None if manual_choice(&choice) => return Err("Выбранный протокол не отвечает. Выберите другой сервер или протокол".into()),
             None => return Err("Связь не установилась - проверьте интернет и нажмите «Включить» ещё раз".into()),
         }
     }
@@ -1641,8 +1639,8 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
 
     // 6а) 27.09 (п.5): быстрый сторож заморозки - счётчики ядра раз в секунду, мгновенное переключение пути
     {
-        let (fa, fd) = (app.clone(), dir.clone());
-        tauri::async_runtime::spawn(async move { freeze_watch(fa, fd, watch_gen).await; });
+        let (fa, fd, fc) = (app.clone(), dir.clone(), choice.clone());
+        tauri::async_runtime::spawn(async move { freeze_watch(fa, fd, watch_gen, fc).await; });
     }
     *HOT_CUR.lock().unwrap() = String::new();
     HOT_BAD.lock().unwrap().clear();
@@ -1654,14 +1652,10 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     // выборе протокола - только сообщение человеку. Интернета нет вообще - только статус.
     let h = app.clone();
     let h_choice = choice.clone();
-    let h_temp_auto = temp_auto;
-    // 28.09 (владелец): тихий возврат на AmneziaWG - человек выбрал AWG, а мы на Xray из-за паузы после сбоя AWG (awg_off, 30 мин);
-    // пауза кончилась - переподключаемся (снова попробуем AWG; не пойдёт - опять Xray на 30 мин)
-    let h_awg_paused = !is_awg && choice == "amneziawg" && awg_off(&dir);
-    let (h_url, h_dir, h_last) = (if offline { String::new() } else { url.clone() }, dir.clone(), last.clone());
+    let (h_url, h_dir, h_last) = (url.clone(), dir.clone(), last.clone());
     // 29.09: подключились по сохранённой конфигурации - как только путь рабочий, забираем подписку ЧЕРЕЗ туннель и переподключаемся
     // один раз на свежие настройки (раньше Мак мог днями ехать на старых)
-    let mut h_refresh = offline && !token.is_empty();
+    let mut h_refresh = cached_bootstrap && !token.is_empty();
     let h_token = token.clone();
     tauri::async_runtime::spawn(async move {
         let client = match reqwest::Proxy::all(format!("http://127.0.0.1:{HTTP_PORT}"))
@@ -1722,14 +1716,18 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                 let mut body: Option<String> = None;
                 if let Ok(pc) = via {
                     if let Ok(u) = sub_url(&pc, &h_token).await {
-                        if let Ok(r) = pc.get(&u).header("User-Agent", format!("InsellersVPN/desktop-{}", env!("CARGO_PKG_VERSION"))).send().await {
-                            if r.status().is_success() { body = r.text().await.ok().filter(|t| t.trim_start().starts_with(['[', '{'])); }
+                        let same_choice = transport_choice(&pc, &h_token).await.ok().as_deref() == Some(h_choice.as_str());
+                        if u == h_url && same_choice {
+                            if let Ok(r) = pc.get(&u).header("User-Agent", format!("InsellersVPN/desktop-{}", env!("CARGO_PKG_VERSION"))).send().await {
+                                if r.status().is_success() { body = r.text().await.ok().filter(|t| t.trim_start().starts_with(['[', '{'])); }
+                            }
                         }
                     }
                 }
                 if let Some(t) = body {
-                    let _ = std::fs::write(h_dir.join("sub.fresh.json"), t);
-                    if cur_gen(&h) == watch_gen && wanted(&h) {
+                    let fresh = json!({"account":h_token,"url":h_url,"choice":h_choice,"text":t});
+                    let _ = crate::private_file::write_private_bytes(&h_dir.join("sub.fresh.json"), fresh.to_string().as_bytes());
+                    if !manual_choice(&h_choice) && cur_gen(&h) == watch_gen && wanted(&h) {
                         crate::remote_log("vpn.config_refresh", json!({"via": "tunnel"}));
                         let b = h.clone();
                         std::thread::spawn(move || { let _ = tauri::async_runtime::block_on(start(b)); });
@@ -1737,35 +1735,14 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                     }
                 }
             }
-            if h_awg_paused && path_ok && !awg_off(&h_dir) {
-                crate::remote_log("vpn.awg_return", json!({}));
-                let b = h.clone();
-                std::thread::spawn(move || { let _ = tauri::async_runtime::block_on(start(b)); });
-                break;
-            }
             if path_ok {
                 if degraded { degraded = false; notify(&h, "connected", "Соединение восстановлено"); }
                 fails = 0;
-                // временный «Автовыбор» вместо ручного протокола истёк - переподключаемся на выбор человека (не пройдёт
-                // проверку - снова «Автовыбор» ещё на 15 мин)
-                if h_temp_auto && crate::now_ms() >= TEMP_AUTO_UNTIL.load(std::sync::atomic::Ordering::SeqCst) {
-                    crate::remote_log("vpn.manual_back", json!({}));
-                    let b = h.clone();
-                    std::thread::spawn(move || {
-                        if !wanted(&b) { return; }
-                        match tauri::async_runtime::block_on(start(b.clone())) {
-                            Ok(()) => {}
-                            Err(e) if e == "CANCELLED" || e == "BUSY" => {}
-                            Err(e) => { if !crate::pref("killswitch") && wanted(&b) { set_proxy(false); } if wanted(&b) { notify(&b, "error", &e); } }
-                        }
-                    });
-                    break;
-                }
                 // этап 3: раз в 15 мин - не сменил ли сервер конфигурацию (центр диагностики - порядок путей для провайдера,
                 // серверы). Сменил - горячая замена ядра: системный прокси и порты те же, человек не переподключается.
-                if !is_awg && !h_url.is_empty() && n % 30 == 0 {
+                if !is_awg && !manual_choice(&h_choice) && !h_url.is_empty() && n % 30 == 0 {
                     let fresh = match http() {
-                        Ok(c) => xray_candidates(&h, &c, &h_url, false, &h_choice, &h_dir, &h_last).await.ok()
+                        Ok(c) => xray_candidates(&h, &c, &h_url, false, &h_choice, &h_dir, &h_last, &h_token).await.ok()
                             .and_then(|v| v.into_iter().next()),
                         Err(_) => None,
                     };
@@ -1780,7 +1757,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                             let up = launch(&h, "xray", vec!["run".into(), "-c".into(), p.to_string_lossy().to_string()], &h_dir).is_ok();
                             if up && link_ok().await {
                                 set_cur_path(&tag); set_cur_desc(&desc);
-                                let _ = std::fs::write(&h_last, &bytes);
+                                let _ = save_profile(&h_last, &bytes, &h_token, &h_url, &h_choice);
                                 crate::remote_log("vpn.path_order", json!({"from": from, "to": desc}));
                             } else {
                                 // новая не поднялась - полное переподключение (оно же вернёт рабочий путь)
@@ -1806,6 +1783,12 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                 let nowg = crate::now_ms();
                 if is_awg && fails >= 2 && nowg.saturating_sub(LAST_AWG_SW.load(std::sync::atomic::Ordering::SeqCst)) >= 30_000 && direct_ok().await {
                     LAST_AWG_SW.store(nowg, std::sync::atomic::Ordering::SeqCst);
+                    if manual_choice(&h_choice) {
+                        crate::remote_log("vpn.path_dead", json!({"path":"awg", "reason":"no204", "how":"awg_live", "manual":true}));
+                        degraded = true;
+                        notify(&h, "degraded", "AmneziaWG не отвечает. Выберите другой сервер или протокол");
+                        continue;
+                    }
                     let mut n1h = 1usize;
                     if let Ok(d) = data_dir(&h) {
                         set_awg_off(&d);
@@ -1839,29 +1822,13 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                     crate::remote_log("vpn.path_dead", json!({"path": dead, "desc": dead_desc, "reason": dead_why, "kb": got / 1024,
                         "ms": took, "kbps": kbps(got, took), "manual": manual_choice(&h_choice)}));
                     crate::check::maybe_run("path_dead");        // 29.09: замер адресов проверки напрямую -> /api/check/result
-                    if manual_choice(&h_choice) && !h_url.is_empty() {
-                        // 26.09 (владелец): ручной протокол не пропускает трафик - временно «Автовыбор» на 15 мин
-                        TEMP_AUTO_UNTIL.store(crate::now_ms() + 15 * 60 * 1000, std::sync::atomic::Ordering::SeqCst);
-                        let name = manual_name(&h_choice);
-                        crate::remote_log("vpn.manual_fallback", json!({"from": dead_desc, "manual": name}));
-                        notify(&h, "connecting", "Связь слабая - пробуем другие пути…");
-                        let b = h.clone();
-                        std::thread::spawn(move || {
-                            if !wanted(&b) { return; }
-                            match tauri::async_runtime::block_on(start(b.clone())) {
-                                Ok(()) => notify(&b, "connected", &format!("Выбранный протокол («{name}») сейчас не работает в Вашей сети - временно подключили через «Автовыбор»")),
-                                Err(e) if e == "CANCELLED" || e == "BUSY" => {}
-                                Err(e) => { if !crate::pref("killswitch") && wanted(&b) { set_proxy(false); } if wanted(&b) { notify(&b, "error", &e); } }
-                            }
-                        });
-                        break;
-                    } else if manual_choice(&h_choice) {
+                    if manual_choice(&h_choice) {
                         if crate::now_ms().saturating_sub(manual_warned) > 30 * 60 * 1000 {
                             manual_warned = crate::now_ms();
                             degraded = true; mark(&h, 2);
-                            notify(&h, "degraded", "Связь слабая - включите «Автовыбор» в настройках: он подберёт другой путь");
+                            notify(&h, "degraded", "Выбранный протокол не отвечает. Выберите другой сервер или протокол");
                         }
-                    } else if let Some(to) = { let t0 = crate::now_ms(); let hc = HOT_CUR.lock().unwrap().clone(); hot_switch(&h, &h_dir, &hc).await.map(|t| (t, t0)) } {
+                    } else if let Some(to) = { let t0 = crate::now_ms(); let hc = HOT_CUR.lock().unwrap().clone(); hot_switch(&h, &h_dir, &hc, &h_choice).await.map(|t| (t, t0)) } {
                         // этап 7: без перезапуска ядра
                         crate::remote_log("vpn.hot_switch", crate::telemetry::switch_fields(json!({"from": dead_desc, "to": to.0, "gap_ms": crate::now_ms().saturating_sub(to.1)}), "handshake_fail"));
                         *HOT_CUR.lock().unwrap() = to.0;

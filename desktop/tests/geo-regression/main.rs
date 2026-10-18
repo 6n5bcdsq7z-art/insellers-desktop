@@ -12,7 +12,7 @@ include!(concat!(env!("OUT_DIR"),"/geo.rs"));
 static STARTED:std::sync::atomic::AtomicUsize=std::sync::atomic::AtomicUsize::new(0);
 async fn barrier(){ STARTED.fetch_add(1,std::sync::atomic::Ordering::SeqCst);while STARTED.load(std::sync::atomic::Ordering::SeqCst)<2{tokio::task::yield_now().await;} }
 async fn sub_url(_: &reqwest::Client,_:&str)->Result<String,String>{barrier().await;Ok("fixture".into())}
-async fn transport_choice(_: &reqwest::Client,_:&str)->String{barrier().await;"manual".into()}
+async fn transport_choice(_: &reqwest::Client,token:&str)->Result<String,String>{barrier().await;if token=="metadata-error" {Err("unavailable".into())} else {Ok("manual".into())}}
 include!(concat!(env!("OUT_DIR"),"/bootstrap.rs"));
 const HTTP_PORT:u16=9;
 static PROBES:std::sync::Mutex<std::collections::VecDeque<(bool,u64,u64,String)>>=std::sync::Mutex::new(std::collections::VecDeque::new());
@@ -44,7 +44,10 @@ async fn serve_once(code:u16, body:&'static str)->String {
  *PROBES.lock().unwrap()=[first,second].into_iter().map(|r|(r=="ok",0,0,r.into())).collect();assert_eq!(freeze_confirmed().await,expected);
  }
  let deadline_start=std::time::Instant::now();assert!(!link_ok_within(1).await);assert!(deadline_start.elapsed()<Duration::from_millis(1300),"deadline overshot");
- let result=tokio::time::timeout(Duration::from_secs(2),bootstrap(http().unwrap(),"fixture-token".into())).await.unwrap();assert_eq!(result,(Ok("fixture".into()),"manual".into()));
+ let result=tokio::time::timeout(Duration::from_secs(2),bootstrap(http().unwrap(),"fixture-token".into())).await.unwrap();assert_eq!(result,(Ok("fixture".into()),Ok("manual".into())));
+ STARTED.store(0,std::sync::atomic::Ordering::SeqCst);
+ let failed=tokio::time::timeout(Duration::from_secs(2),bootstrap(http().unwrap(),"metadata-error".into())).await.unwrap();
+ assert_eq!(failed,(Ok("fixture".into()),Err("unavailable".into())),"missing choice metadata must remain an error");
  let dir=tempfile::tempdir().unwrap();let path=dir.path().to_path_buf();
  for n in ["geoip.dat","geosite.dat"] {std::fs::write(path.join(n),vec![7;2048]).unwrap();std::fs::File::open(path.join(n)).unwrap().set_modified(std::time::UNIX_EPOCH).unwrap();}
  let t=std::time::Instant::now();assert!(ensure_geo(&AppHandle,&path).await);assert!(t.elapsed()<Duration::from_millis(100));
