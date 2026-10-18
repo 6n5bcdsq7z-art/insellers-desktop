@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	Version = "5" // Include the full public Hochutusit hostname before endpoint bypass.
+	Version = "6" // Reinstall the privileged bundle with sing-box 1.14.3.
 	Listen  = "127.0.0.1:38811"
 )
 
@@ -77,7 +77,7 @@ func token() string {
 	return s
 }
 
-// config - конфигурация sing-box (формат 1.12+; проверено sing-box check 1.14.2).
+// config - конфигурация sing-box (формат 1.12+; проверено sing-box check 1.14.3).
 func config(socks int, bypass []string, dns string) ([]byte, error) {
 	cidr := []string{}
 	for _, b := range bypass {
