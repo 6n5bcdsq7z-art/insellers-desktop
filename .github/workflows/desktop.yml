@@ -115,11 +115,11 @@ jobs:
             lipo -create -output "$out/wireproxy-universal-apple-darwin" "$out/wireproxy-aarch64-apple-darwin" "$out/wireproxy-x86_64-apple-darwin"
           fi
           chmod +x "$out"/wireproxy-*; ls -la "$out"
-      - name: TUN - помощник ins-helper (Go) и sing-box 1.14.2 (sidecar)
+      - name: TUN - помощник ins-helper (Go) и sing-box (pinned sidecar)
         # 26.09 (владелец): весь трафик компьютера через VPN. Помощник - desktop/helper, sing-box - из исходников той же версии (закреплена).
         run: |
           set -e
-          out=$PWD/src-tauri/binaries; SB=1.14.2; export CGO_ENABLED=0
+          out=$PWD/src-tauri/binaries; SB=$(cat helper/sing-box.version); export CGO_ENABLED=0
           hb() { (cd helper && GOOS=$1 GOARCH=$2 go build -trimpath -ldflags="-s -w" -o "$out/ins-helper-$3" .); }
           # 26.09 ночь (владелец: обновление весит слишком много): sing-box собираем из исходников той же версии ТОЛЬКО с gvisor
           # (помощнику нужен tun stack mixed + socks + direct + dns) - ~40 МБ на архитектуру вместо ~86 у официального релиза

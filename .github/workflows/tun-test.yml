@@ -25,7 +25,7 @@ jobs:
         run: |
           set -e
           printf '%s' "$CFG" > client.json
-          SB=1.14.2; X=https://github.com/XTLS/Xray-core/releases/latest/download
+          SB=$(cat desktop/helper/sing-box.version); X=https://github.com/XTLS/Xray-core/releases/download/v26.3.27
           G=https://github.com/SagerNet/sing-box/releases/download/v$SB
           (cd desktop/helper && CGO_ENABLED=0 go build -o ../../ins-helper$([ "$RUNNER_OS" = Windows ] && echo .exe) .)
           if [ "$RUNNER_OS" = "Windows" ]; then
