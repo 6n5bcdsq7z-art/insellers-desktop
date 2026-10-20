@@ -11,7 +11,7 @@ static PROXY: AtomicBool = AtomicBool::new(false);
 static TUN: AtomicBool = AtomicBool::new(true);
 static CORE: AtomicBool = AtomicBool::new(true);
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Phase { None, Status, SetProxy, ProxyCheck, RetrySleep, Wanted, TimerBefore, TimerAfter, FinalReturn }
+enum Phase { None, Status, SetProxy, ProxyCheck, RetrySleep, Wanted, TimerBefore, TimerAfter, FinalReturn, OwnStop }
 struct Gate { phase: Phase, entered: bool, release: bool }
 static GATE: (Mutex<Gate>, Condvar) = (Mutex::new(Gate { phase: Phase::None, entered: false, release: false }), Condvar::new());
 
@@ -59,12 +59,36 @@ mod test_platform {
     pub mod tun {
         use super::*;
         pub fn status() -> serde_json::Value { pause(Phase::Status); json!({"fixture":true}) }
-        pub fn down() { TUN.store(false, Ordering::SeqCst); }
+        pub fn down() { pause(Phase::OwnStop); TUN.store(false, Ordering::SeqCst); }
     }
 }
 include!(concat!(env!("OUT_DIR"), "/cancellation.rs"));
 
 pub fn run() {
+    // Startup's own cleanup holds the transition lock. A concurrent explicit
+    // stop must not be adopted as this startup's generation when cleanup ends.
+    *GATE.0.lock().unwrap() = Gate { phase: Phase::OwnStop, entered: false, release: false };
+    let app = AppHandle(Arc::new(VpnState { guest_gen: AtomicU32::new(1), wanted: AtomicBool::new(true), child: Mutex::new(Some(Child)) }));
+    let worker_app = app.clone();
+    let worker = std::thread::spawn(move || begin_start(worker_app, 1));
+    let (lock, cv) = &GATE;
+    let g = lock.lock().unwrap();
+    let (g, timeout) = cv.wait_timeout_while(g, Duration::from_secs(3), |g| !g.entered).unwrap();
+    assert!(!timeout.timed_out(), "own stop did not enter blocked teardown"); drop(g);
+    assert_eq!(cur_gen(&app), 2, "startup's own stop advances exactly once");
+    let stop_app = app.clone();
+    let stopper = std::thread::spawn(move || stop(&stop_app));
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while cur_gen(&app) == 2 && std::time::Instant::now() < deadline { std::thread::yield_now(); }
+    assert_eq!(cur_gen(&app), 3, "user stop must cancel during blocked own cleanup");
+    { let mut g = lock.lock().unwrap(); g.release = true; cv.notify_all(); }
+    let result = worker.join().unwrap(); stopper.join().unwrap();
+    assert_eq!(result, Err("CANCELLED".into()), "startup adopted a concurrent user stop as its own generation");
+    assert!(!wanted(&app) && !CORE.load(Ordering::SeqCst) && !TUN.load(Ordering::SeqCst) && !PROXY.load(Ordering::SeqCst));
+    *GATE.0.lock().unwrap() = Gate { phase: Phase::None, entered: false, release: true };
+    let app = AppHandle(Arc::new(VpnState { guest_gen: AtomicU32::new(1), wanted: AtomicBool::new(true), child: Mutex::new(Some(Child)) }));
+    assert_eq!(begin_start(app, 1), Ok(2), "ordinary own cleanup keeps startup enabled");
+    println!("PASS actual Desktop own-stop boundary: concurrent stop cancels; ordinary cleanup advances once");
     for phase in [Phase::Status, Phase::SetProxy, Phase::ProxyCheck, Phase::RetrySleep, Phase::Wanted, Phase::TimerBefore, Phase::TimerAfter, Phase::FinalReturn] {
         *GATE.0.lock().unwrap() = Gate { phase, entered: false, release: false };
         PROXY.store(false, Ordering::SeqCst); TUN.store(true, Ordering::SeqCst); CORE.store(true, Ordering::SeqCst);

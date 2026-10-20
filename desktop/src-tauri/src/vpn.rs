@@ -1305,7 +1305,10 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     }
     if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
     stop(&app);
-    let my_gen = cur_gen(&app);
+    // Our cleanup advances once. A user stop during its blocking OS calls is
+    // cancellation, not the generation of a new connection to adopt.
+    let my_gen = my_gen.wrapping_add(1);
+    if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
     // 26.09 (владелец: «приложение врёт»): «Подключено» - только когда через туннель реально открылся внешний сайт.
     // Путь не пропускает трафик - сами пробуем следующий (порядок путей от сервера = выбор центра диагностики для
     // провайдера), системный прокси ставим только на проверенный путь. Не прошёл ни один - честная ошибка.
