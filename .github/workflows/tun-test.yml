@@ -50,6 +50,13 @@ jobs:
           protocol = remote.get("protocol")
           safe = protocol if protocol in ("vless","vmess","trojan","shadowsocks","hysteria","hysteria2","socks","http","wireguard") else "other"
           print("::notice title=TUN test scope::Isolated first remote outbound protocol: " + safe)
+          settings = remote.get("streamSettings", {})
+          transport, security = settings.get("network","tcp"), settings.get("security","none")
+          transport = transport if transport in ("tcp","raw","ws","xhttp","splithttp","grpc","httpupgrade","h2","quic") else "other"
+          security = security if security in ("none","tls","reality") else "other"
+          print("::notice title=TUN test scope::Transport: " + transport + "; security: " + security)
+          # Private ephemeral diagnostics; publish error categories only.
+          cfg["log"] = {"loglevel":"debug","access":"xray-access.log","error":"xray-error.log"}
           fd = os.open("client.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
           with os.fdopen(fd,"w") as output:
               json.dump(cfg,output)
@@ -60,6 +67,7 @@ jobs:
       - name: Ядро, sing-box, помощник, гео
         run: |
           set -e
+          umask 077
           SB=$(cat desktop/helper/sing-box.version); X=https://github.com/XTLS/Xray-core/releases/download/v26.3.27
           G=https://github.com/SagerNet/sing-box/releases/download/v$SB
           (cd desktop/helper && CGO_ENABLED=0 go build -o ../../ins-helper$([ "$RUNNER_OS" = Windows ] && echo .exe) .)
@@ -76,6 +84,7 @@ jobs:
       - name: Помощник (как после установки) и ядро
         run: |
           set -e
+          umask 077
           if [ "$RUNNER_OS" = "Windows" ]; then
             D="/c/Program Files/INSELLERS VPN Helper"; mkdir -p "$D"; cp ins-helper.exe sing-box.exe "$D/"
             echo testtoken0123456789 > "$D/token"

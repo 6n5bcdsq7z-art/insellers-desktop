@@ -117,10 +117,13 @@ with tempfile.TemporaryDirectory() as payload_dir:
 ok("preflight: forced remote core transfers 32 KiB before TUN", payload_ok)
 if not proxy_identity or not payload_ok:
     # Publish categories only, never the test key, endpoint or raw configuration.
-    try:
-        log = open("xray.out", encoding="utf-8", errors="replace").read().lower()
-    except OSError:
-        log = ""
+    log = ""
+    for name in ("xray.out", "xray-error.log"):
+        try:
+            with open(name, encoding="utf-8", errors="replace") as file:
+                log += file.read(1024 * 1024).lower()
+        except OSError:
+            pass
     categories = {
         "timeout": ("timeout", "timed out", "deadline exceeded"),
         "refused": ("connection refused", "actively refused"),
@@ -128,6 +131,8 @@ if not proxy_identity or not payload_ok:
         "auth": ("invalid user", "invalid authentication", "rejected user"),
         "config": ("failed to load config", "failed to build config"),
         "tls": ("tls handshake", "certificate"),
+        "reality_handshake": ("reality: failed", "reality: processed invalid connection"),
+        "connection_closed": ("connection reset", "unexpected eof", "broken pipe", "closed pipe"),
     }
     found = [name for name, terms in categories.items() if any(t in log for t in terms)]
     print("::error title=TUN acceptance blocked::Core/profile fails before TUN; error categories: " + (", ".join(found) or "not available"))
