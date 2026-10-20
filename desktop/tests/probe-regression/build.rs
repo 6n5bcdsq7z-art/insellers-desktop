@@ -32,7 +32,7 @@ fn main() {
  let begin=format!("{}\n{}\n{}\n", &cancellation_src[begin_a..begin_a+stop_call.len()], &cancellation_src[generation_a..generation_b], guard);
  let status=section("                    let st = tauri::async_runtime::spawn_blocking(crate::tun::status)","\n                }");
  let finish_start=if cancellation_src.contains("    let transition = CONNECTION_TRANSITION.lock()") {"    let transition = CONNECTION_TRANSITION.lock()"}else{"    if !tun_on {"};
- let finish=section(finish_start,"\n    // 5) Monitor our own tunnel");
+ let finish=section(finish_start,"\n    let w = app.clone();");
  let final_a=cancellation_src.rfind("\n    });\n").unwrap()+"\n    });\n".len();
  let final_b=cancellation_src.rfind("\n}").unwrap();
  let final_return=&cancellation_src[final_a..final_b];
