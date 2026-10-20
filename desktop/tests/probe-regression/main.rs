@@ -43,6 +43,22 @@ async fn main(){
  let (ok,_,elapsed,_)=traffic_probe::check_urls(port,32768,Duration::from_millis(500),&["http://fixture.invalid/stalled-body"]).await;
  assert!(!ok&&elapsed<1500,"headers must not reset the body deadline");
  println!("9 real-traffic startup/fallback/deadline cases PASS");
+ for (status,size,expected) in [(204,0,false),(500,65536,false),(200,64,false),(302,65536,false),(200,32768,true)] {
+  let port=mock(status,size,false).await;
+  let url=format!("http://127.0.0.1:{port}/routed");
+  let (ok,_,_,_)=traffic_probe::check_routed_urls(32768,Duration::from_secs(2),&[&url]).await;
+  assert_eq!(ok,expected,"routed traffic: {status}/{size}");
+ }
+ let primary=mock(503,65536,false).await;
+ let fallback=mock(200,32768,false).await;
+ let urls=[format!("http://127.0.0.1:{primary}/routed"),format!("http://127.0.0.1:{fallback}/routed")];
+ let (ok,bytes,_,_)=traffic_probe::check_routed_urls(32768,Duration::from_secs(2),&[&urls[0],&urls[1]]).await;
+ assert!(ok&&bytes>=32768,"routed independent fallback must carry real bytes");
+ let stalled=mock(200,0,true).await;
+ let url=format!("http://127.0.0.1:{stalled}/routed");
+ let (ok,_,elapsed,_)=traffic_probe::check_routed_urls(32768,Duration::from_millis(500),&[&url]).await;
+ assert!(!ok&&elapsed<1500,"routed response deadline must be bounded");
+ println!("7 system-route payload/fallback/deadline cases PASS (not an OS TUN test)");
  for status in [401,403,404,500,502] {let p=mock(status,262144,false).await;let (_,n,e)=get_via(p,"http://probe.invalid/128k",131072,2).await;assert_eq!(n,0,"error body must not count");assert_eq!(e,format!("http {status}"));println!("PASS large HTTP {status} rejected before byte limit");}
  for (status,size,max) in [(204,0,1024),(200,131072,131072),(200,2048,1024)] {let p=mock(status,size,false).await;let (_,n,e)=get_via(p,"http://probe.invalid/test",max,2).await;assert!(e.is_empty(),"{e}");assert!(n>=max||status==204);println!("PASS valid {status} {size} bytes");}
  let p=mock(200,64,false).await;let (_,n,e)=get_via(p,"http://probe.invalid/128k",131072,2).await;assert!(e.is_empty()&&n<131072);println!("PASS short payload retains size for caller rejection");

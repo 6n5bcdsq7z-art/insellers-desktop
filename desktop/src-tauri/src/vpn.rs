@@ -1388,22 +1388,24 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         if cur_gen(&app) != my_gen { crate::tun::down(); kill_child(&app); return Err("CANCELLED".into()); }
         match r {
             Ok(()) => {
-                // TUN встал - проверяем, что через него реально идёт трафик (запрос без прокси = через TUN). 26.09: на Mac
-                // сразу после включения помощник меняет DNS служб и перезапускает mDNSResponder - первая попытка падала
-                // (1.0.113 у владельца). Три попытки за ~15 с; причина провала - в журнал.
+                // The proxy was checked above. Now exercise system DNS/routes and
+                // HTTPS payloads without an explicit proxy; HTTP 204 can succeed
+                // while TLS or larger responses stall. Allow DNS to settle first.
                 let mut ok = false;
                 let mut why = String::new();
-                if let Ok(c) = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build() {
-                    for i in 0..3u64 {
-                        tauri::async_runtime::spawn_blocking(move || std::thread::sleep(Duration::from_millis(1000 + 1500 * i))).await.ok();
-                        match c.get("http://cp.cloudflare.com/generate_204").send().await {
-                            Ok(r) if r.status().as_u16() == 204 => { ok = true; break; }
-                            Ok(r) => why = format!("ответ {}", r.status().as_u16()),
-                            Err(e) => why = format!("{}{}", if e.is_timeout() { "таймаут: " } else if e.is_connect() { "соединение: " } else { "" }, e),
-                        }
-                    }
+                let mut probe_bytes = 0;
+                let mut probe_ms = 0;
+                for i in 0..2u64 {
+                    tauri::async_runtime::spawn_blocking(move || std::thread::sleep(Duration::from_millis(1000 + 1500 * i))).await.ok();
+                    // stop() already removed this TUN/core when it changed the
+                    // generation. StartGuard prevents a new startup until return.
+                    if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
+                    let result = crate::traffic_probe::check_routed(32_768, Duration::from_secs(6)).await;
+                    if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
+                    (ok, probe_bytes, probe_ms, why) = result;
+                    if ok { break; }
                 }
-                if ok { tun_on = true; crate::remote_log("vpn.tun_on", json!({"dns": dns})); }
+                if ok { tun_on = true; crate::remote_log("vpn.tun_on", json!({"dns": dns, "how": "routed_https32k", "bytes": probe_bytes, "ms": probe_ms})); }
                 else {
                     let st = tauri::async_runtime::spawn_blocking(crate::tun::status).await.unwrap_or_default();
                     crate::tun::down();

@@ -8,20 +8,42 @@ pub async fn check(port: u16, bytes: u64, budget: Duration) -> (bool, u64, u64, 
     check_urls(port, bytes, budget, &[&primary, &fallback]).await
 }
 
+/// After the helper installs its routes, use the OS route rather than the local
+/// proxy. This is a separate check: a working proxy does not prove TUN/DNS works.
+pub async fn check_routed(bytes: u64, budget: Duration) -> (bool, u64, u64, String) {
+    let size = if bytes <= 32_768 { "32k" } else { "256k" };
+    let primary = format!("https://vpn.insellers.su/probe/{size}");
+    let fallback = format!("https://speed.cloudflare.com/__down?bytes={bytes}");
+    check_routed_urls(bytes, budget, &[&primary, &fallback]).await
+}
+
+pub(crate) async fn check_routed_urls(want: u64, budget: Duration, urls: &[&str]) -> (bool, u64, u64, String) {
+    let client = reqwest::Client::builder().no_proxy()
+        .redirect(reqwest::redirect::Policy::none()).build();
+    match client {
+        Ok(client) => read_urls(client, want, budget, urls).await,
+        Err(_) => (false, 0, 0, "io".into()),
+    }
+}
+
 /// All requests use the explicit local core; there is no direct-network fallback.
 /// The second independent HTTPS origin avoids treating our probe's outage as a
 /// dead tunnel. One deadline covers headers AND the streamed response bodies.
 pub(crate) async fn check_urls(
     port: u16, want: u64, budget: Duration, urls: &[&str],
 ) -> (bool, u64, u64, String) {
-    let started = Instant::now();
-    let elapsed = || started.elapsed().as_millis() as u64;
     let client = match reqwest::Proxy::all(format!("http://127.0.0.1:{port}"))
         .and_then(|proxy| reqwest::Client::builder().no_proxy().proxy(proxy)
             .redirect(reqwest::redirect::Policy::none()).build()) {
         Ok(client) => client,
-        Err(_) => return (false, 0, elapsed(), "io".into()),
+        Err(_) => return (false, 0, 0, "io".into()),
     };
+    read_urls(client, want, budget, urls).await
+}
+
+async fn read_urls(client: reqwest::Client, want: u64, budget: Duration, urls: &[&str]) -> (bool, u64, u64, String) {
+    let started = Instant::now();
+    let elapsed = || started.elapsed().as_millis() as u64;
     let mut reason = String::from("timeout");
     let mut most_bytes = 0;
     for (index, url) in urls.iter().enumerate() {
