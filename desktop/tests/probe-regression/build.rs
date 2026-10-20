@@ -19,7 +19,17 @@ fn main() {
  let cancellation_src=env::var("INSELLERS_VPN_CANCEL_SOURCE").ok().map(|p|fs::read_to_string(p).unwrap()).unwrap_or(v);
  let section=|start:&str,end:&str| {let a=cancellation_src.find(start).unwrap();let b=a+cancellation_src[a..].find(end).unwrap();cancellation_src[a..b].to_owned()};
  let stop=section("pub fn stop(","/// Kept for the bridge");
- let begin=section("    stop(&app);", "    // 26.09 (владелец: «приложение врёт»)");
+ // Stacked PR bases can still have platform cleanup after this boundary.
+ // Compile only the own-stop call, its generation assignment and immediate
+ // cancellation guard; neither the old base nor the before-source needs a stub
+ // for unrelated kill_other_vpns/platform helpers.
+ let stop_call="    stop(&app);";
+ let begin_a=cancellation_src.find(stop_call).unwrap();
+ let generation_a=begin_a+cancellation_src[begin_a..].find("    let my_gen = ").unwrap();
+ let generation_b=generation_a+cancellation_src[generation_a..].find('\n').unwrap();
+ let next_line=cancellation_src[generation_b+1..].lines().next().unwrap_or("");
+ let guard=if next_line.trim_start().starts_with("if cur_gen(&app) != my_gen") {next_line}else{""};
+ let begin=format!("{}\n{}\n{}\n", &cancellation_src[begin_a..begin_a+stop_call.len()], &cancellation_src[generation_a..generation_b], guard);
  let status=section("                    let st = tauri::async_runtime::spawn_blocking(crate::tun::status)","\n                }");
  let finish_start=if cancellation_src.contains("    let transition = CONNECTION_TRANSITION.lock()") {"    let transition = CONNECTION_TRANSITION.lock()"}else{"    if !tun_on {"};
  let finish=section(finish_start,"\n    // 5) Monitor our own tunnel");
