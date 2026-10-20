@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod vpn;
+mod connection_guard;
 mod check;
 mod probe;
 mod tun;

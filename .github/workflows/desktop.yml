@@ -18,7 +18,7 @@ on:
       stage:
         description: "candidate - собрать и загрузить, людям НЕ публиковать (выпуск - workflow promote); all - сразу всем"
         required: false
-        default: "all"
+        default: "candidate"
   # расписание GitHub (cron) ни разу не сработало - ночную сборку запускает таймер Hetzner insellers-desktop-nightly (04:15 UTC)
 
 # новая сборка отменяет ещё идущую старую (публикация при этом строго по очереди)
@@ -206,7 +206,7 @@ jobs:
           KEY: ${{ secrets.DESKTOP_UPLOAD_KEY }}
           NOTES: ${{ github.event.inputs.notes }}
           NOTES_EN: ${{ github.event.inputs.notes_en }}
-          STAGE: ${{ github.event.inputs.stage || 'all' }}
+          STAGE: ${{ github.event.inputs.stage || 'candidate' }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail

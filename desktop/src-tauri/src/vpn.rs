@@ -9,62 +9,21 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
-/// Известные VPN/прокси-клиенты: перед подключением закрываем их, чтобы не перехватывали трафик.
-const OTHER_VPN: &[(&str, &str)] = &[
-    ("happ", "Happ"), ("v2rayn", "v2rayN"), ("v2raytun", "v2RayTun"), ("clash", "Clash"), ("mihomo", "Clash"),
-    ("hiddify", "Hiddify"), ("karing", "Karing"), ("nekoray", "NekoRay"), ("nekobox", "NekoBox"),
-    ("sing-box", "sing-box"), ("outline", "Outline"), ("amnezia", "AmneziaVPN"), ("streisand", "Streisand"),
-    ("foxray", "FoXray"), ("v2box", "V2Box"), ("xray", "Xray"), ("throne", "Throne"), ("flclash", "FlClash"),
-];
-
-/// Закрывает чужие VPN-клиенты. Возвращает (кого закрыли, кого закрыть не получилось).
-pub fn kill_other_vpns() -> (Vec<String>, Vec<String>) {
-    let mut killed = Vec::new();
-    let mut failed = Vec::new();
-    let own_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
-    let sys = sysinfo::System::new_all();
-    let me = std::process::id();
-    for (pid, p) in sys.processes() {
-        if pid.as_u32() == me { continue; }
-        let name = p.name().to_string_lossy().to_lowercase();
-        if name.contains("insellers") { continue; }
-        // наш TUN (26.09): sing-box помощника работает от root из его папки - exe у root-процесса часто не виден, узнаём по имени
-        if (name == "sing-box" || name == "sing-box.exe" || name.starts_with("ins-helper")) && crate::tun::installed() { continue; }
-        // наш собственный Xray (sidecar) лежит рядом с приложением — его не трогаем
-        if let (Some(exe), Some(dir)) = (p.exe(), own_dir.as_ref()) { if exe.starts_with(dir) { continue; } }
-        if let Some((_, title)) = OTHER_VPN.iter().find(|(k, _)| name.contains(k)) {
-            let t = title.to_string();
-            if p.kill() { if !killed.contains(&t) { killed.push(t); } }
-            else if !failed.contains(&t) { failed.push(t); }
-        }
-    }
-    (killed, failed)
-}
-
-/// macOS: VPN через системные расширения (Happ из App Store, Outline, Amnezia, WireGuard…) не видны как
-/// обычные процессы и не трогают системный прокси — их туннель останавливаем через `scutil --nc stop`.
-#[cfg(target_os = "macos")]
-fn stop_other_ne_vpns() -> Vec<String> {
-    let out = std::process::Command::new("/usr/sbin/scutil").args(["--nc", "list"]).output().ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
-    let mut stopped = Vec::new();
-    for line in out.lines() {
-        if !line.contains("(Connected)") && !line.contains("(Connecting)") { continue; }
-        let name = match line.split('"').nth(1) { Some(n) if !n.is_empty() => n.to_string(), _ => continue };
-        if name.to_lowercase().contains("insellers") { continue; }
-        let _ = std::process::Command::new("/usr/sbin/scutil").args(["--nc", "stop", &name]).output();
-        stopped.push(name);
-    }
-    stopped
-}
-
-/// Наш VPN — единственный: пока он включён, закрываем чужие клиенты и их туннели.
-/// Два VPN одновременно мешают друг другу (трафик уходит то в один, то в другой, сайты «не грузятся»).
-fn enforce_exclusive() -> Vec<String> {
-    let (mut k, _) = kill_other_vpns();
+/// Detect active connections; never terminate another VPN or change its settings.
+fn external_connection() -> Vec<String> {
     #[cfg(target_os = "macos")]
-    for n in stop_other_ne_vpns() { if !k.contains(&n) { k.push(n); } }
-    k
+    {
+        let output = std::process::Command::new("/usr/sbin/scutil").args(["--nc", "list"])
+            .output().ok().filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        let connections = crate::connection_guard::connected_network_extensions(&output);
+        if !connections.is_empty() { return connections; }
+    }
+    match sysproxy::Sysproxy::get_system_proxy() {
+        Ok(p) if crate::connection_guard::foreign_proxy(p.enable, &p.host, p.port, HTTP_PORT, SOCKS_PORT) =>
+            vec!["другой системный прокси".to_owned()],
+        _ => Vec::new(),
+    }
 }
 
 /// Наш ли сейчас системный прокси.
@@ -1388,19 +1347,14 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         fetch_ad_hosts(&client, &dir).await;
     }
     if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
-    // Keep the current tunnel and system proxy until bootstrap succeeds.
+    // A prepared profile does not prove it works. Preserve the user's other VPN.
+    let conflicts = tauri::async_runtime::spawn_blocking(external_connection).await.unwrap_or_default();
+    if !conflicts.is_empty() {
+        return Err(format!("OTHER_VPN:Сейчас работает {}. Его подключение сохранено. Для проверки INSELLERS отключите другой VPN вручную", conflicts.join(", ")));
+    }
+    if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
     stop(&app);
     let my_gen = cur_gen(&app);
-    // 0) закрываем чужие VPN-клиенты
-    #[allow(unused_mut)]
-    let (mut killed, failed) = kill_other_vpns();
-    #[cfg(target_os = "macos")]
-    for n in stop_other_ne_vpns() { if !killed.contains(&n) { killed.push(n); } }
-    if !killed.is_empty() { notify(&app, "connecting", &format!("Отключаем другой VPN: {}…", killed.join(", "))); }
-    if !failed.is_empty() {
-        return Err(format!("OTHER_VPN:Не получилось закрыть {} - закройте его вручную и нажмите «Включить» ещё раз", failed.join(", ")));
-    }
-    if !killed.is_empty() { std::thread::sleep(Duration::from_millis(800)); }
     // 26.09 (владелец: «приложение врёт»): «Подключено» - только когда через туннель реально открылся внешний сайт.
     // Путь не пропускает трафик - сами пробуем следующий (порядок путей от сервера = выбор центра диагностики для
     // провайдера), системный прокси ставим только на проверенный путь. Не прошёл ни один - честная ошибка.
@@ -1558,11 +1512,9 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     arm_guest_timer(&app, until);
     let watch_gen = cur_gen(&app);
 
-    // 5) сторож: каждые 5 с закрываем чужие VPN (процессы и туннели системных расширений на Mac),
-    // и если кто-то перехватил системный прокси — возвращаем свой
+    // 5) Monitor our own tunnel; yield to another connection without stopping it.
     let w = app.clone();
     tauri::async_runtime::spawn(async move {
-        let mut told: Vec<String> = Vec::new();
         // 26.09 ночь: сон/пробуждение и смена сети - в журнал (утром проверяем, как VPN поднимается после них).
         // Сон = часы ушли вперёд больше чем на 30 с между 5-секундными шагами; сеть = сменился шлюз по умолчанию (раз в 30 с).
         let mut last_tick = crate::now_ms();
@@ -1592,12 +1544,12 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                 running = is_running(&w);
             }
             if !running || cur_gen(&w) != watch_gen { break; }   // отключились или это уже другое подключение
-            let closed = tauri::async_runtime::spawn_blocking(enforce_exclusive).await.unwrap_or_default();
+            let conflicts = tauri::async_runtime::spawn_blocking(external_connection).await.unwrap_or_default();
             if cur_gen(&w) != watch_gen || !wanted(&w) { break; }
-            let fresh: Vec<String> = closed.into_iter().filter(|n| !told.contains(n)).collect();
-            if !fresh.is_empty() {
-                told.extend(fresh.iter().cloned());
-                notify(&w, "connected", &format!("Закрыли {} - два VPN одновременно мешают друг другу", fresh.join(", ")));
+            if !conflicts.is_empty() {
+                stop(&w);
+                notify(&w, "disconnected", "Обнаружено другое подключение. Оно сохранено, INSELLERS остановлен");
+                break;
             }
             if crate::tun::active() {
                 // «пульс» (помощник снимает TUN, если приложение молчит 60 с); TUN пропал (помощник снял) - переподключаемся
@@ -1608,12 +1560,11 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                     break;
                 }
             } else if !proxy_is_ours() {
-                let (k, _) = kill_other_vpns();
-                if cur_gen(&w) != watch_gen || !wanted(&w) { break; }   // пока проверяли — нажали «Отключить»
-                set_proxy(true);
-                if !k.is_empty() {
-                    notify(&w, "connected", &format!("{} пытался перехватить подключение - защита восстановлена", k.join(", ")));
-                }
+                if cur_gen(&w) != watch_gen || !wanted(&w) { break; }
+                // Another app or the user changed proxy settings. Do not fight for them.
+                stop(&w);
+                notify(&w, "disconnected", "Настройки подключения изменились. INSELLERS остановлен, чтобы сохранить Вашу сеть");
+                break;
             }
         }
     });
