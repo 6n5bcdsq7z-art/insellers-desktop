@@ -2,7 +2,7 @@
 """Проверка механизма TUN на раннере (macOS/Windows): ядро xray с конфигурацией тестового ключа + ins-helper + sing-box.
 Секрет TUN_TEST_CONFIG - клиентская конфигурация (как у приложения: socks 38808, http 38809). Печатает итог, код 1 - провал.
 Что НЕ проверить на раннере: сон/пробуждение, смена Wi-Fi, реальный пароль администратора / окно UAC."""
-import atexit, ipaddress, json, os, platform, socket, subprocess, sys, threading, time
+import atexit, ipaddress, json, os, platform, socket, subprocess, sys, tempfile, threading, time
 
 WIN = platform.system() == "Windows"
 HD = r"C:\Program Files\INSELLERS VPN Helper" if WIN else "/Library/PrivilegedHelperTools/su.insellers.helper"
@@ -88,6 +88,38 @@ def heartbeat():
             pass
 threading.Thread(target=heartbeat, daemon=True).start()
 
+# Establish a working core/profile before testing OS routes. A stale test key or
+# unreachable endpoint must not be reported as a TUN/DNS implementation failure.
+rc, proxy_ip = curl("https://ifconfig.me", ["--proxy", "http://127.0.0.1:38809"])
+proxy_identity = rc == 0 and valid_ip(proxy_ip) and proxy_ip not in (base_ip, base_ip6)
+ok("preflight: core/profile changes public IP before TUN", proxy_identity)
+with tempfile.TemporaryDirectory() as payload_dir:
+    probe = subprocess.run([
+        "curl", "-fsS", "--proto", "=https", "--connect-timeout", "5", "-m", "15",
+        "--proxy", "http://127.0.0.1:38809", "-o", os.path.join(payload_dir, "probe.bin"),
+        "-w", "%{http_code}:%{size_download}", "https://vpn.insellers.su/probe/32k",
+    ], capture_output=True, text=True)
+    parts = probe.stdout.split(":")
+    payload_ok = probe.returncode == 0 and len(parts) == 2 and parts[0] == "200" and float(parts[1]) >= 32768
+ok("preflight: core/profile transfers 32 KiB before TUN", payload_ok)
+if not proxy_identity or not payload_ok:
+    # Publish categories only, never the test key, endpoint or raw configuration.
+    try:
+        log = open("xray.out", encoding="utf-8", errors="replace").read().lower()
+    except OSError:
+        log = ""
+    categories = {
+        "timeout": ("timeout", "timed out", "deadline exceeded"),
+        "refused": ("connection refused", "actively refused"),
+        "dns": ("no such host", "failed to lookup"),
+        "auth": ("invalid user", "invalid authentication", "rejected user"),
+        "config": ("failed to load config", "failed to build config"),
+        "tls": ("tls handshake", "certificate"),
+    }
+    found = [name for name, terms in categories.items() if any(t in log for t in terms)]
+    print("::error title=TUN acceptance blocked::Core/profile fails before TUN; error categories: " + (", ".join(found) or "not available"))
+    sys.exit(1)
+
 r = helper({"cmd": "up", "token": token, "socks": 38808, "bypass": sorted(SERVERS), "dns": "udp"})
 ok("helper up", r.get("ok"), json.dumps(r, ensure_ascii=False))
 time.sleep(5)
@@ -122,7 +154,10 @@ ok("3b. DNS-запросы системы уходят в ядро (dns-out), н
 tun_res = resolver_ip()
 ok("3c. резолвер в TUN отличается от исходного (не полная проверка утечек)", bool(tun_res) and not (set(tun_res) & set(base_res)),
    f"до {base_res} -> в TUN {tun_res}")
-ya = sorted({i[4][0] for i in socket.getaddrinfo("ya.ru", 443, socket.AF_INET)})
+try:
+    ya = sorted({i[4][0] for i in socket.getaddrinfo("ya.ru", 443, socket.AF_INET)})
+except OSError:
+    ya = []
 curl("https://ya.ru/")
 time.sleep(2)
 lg = xlog()
