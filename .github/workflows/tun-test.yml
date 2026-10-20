@@ -38,17 +38,28 @@ jobs:
           if any(os.environ.get(k) for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")):
               print("::error title=TUN acceptance blocked::Runner has a managed proxy; direct system-routing test cannot bypass it.")
               raise SystemExit(1)
+          # Isolated probe input: prove the server/engine before testing the
+          # unchanged normal profile routing on SOCKS38808. No account changes.
+          remote = next(o for o in cfg["outbounds"] if o.get("protocol") not in ("freedom", "blackhole", "dns"))
+          if not remote.get("tag"):
+              remote["tag"] = "audit-vpn"
+          assert all(i.get("port") != 38812 and i.get("tag") != "audit-probe" for i in cfg["inbounds"])
+          cfg["inbounds"].append({"listen":"127.0.0.1","port":38812,"protocol":"http","tag":"audit-probe"})
+          cfg.setdefault("routing", {}).setdefault("rules", []).insert(0,
+              {"type":"field","inboundTag":["audit-probe"],"outboundTag":remote["tag"]})
+          protocol = remote.get("protocol")
+          safe = protocol if protocol in ("vless","vmess","trojan","shadowsocks","hysteria","hysteria2","socks","http","wireguard") else "other"
+          print("::notice title=TUN test scope::Isolated first remote outbound protocol: " + safe)
+          fd = os.open("client.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(fd,"w") as output:
+              json.dump(cfg,output)
           print("Isolated test configuration present; contents not logged.")
           PY
       - uses: actions/setup-go@v5
         with: { go-version: "1.26.x", cache: false }
       - name: Ядро, sing-box, помощник, гео
-        env:
-          CFG: ${{ secrets.TUN_TEST_CONFIG }}
         run: |
           set -e
-          umask 077
-          printf '%s' "$CFG" > client.json
           SB=$(cat desktop/helper/sing-box.version); X=https://github.com/XTLS/Xray-core/releases/download/v26.3.27
           G=https://github.com/SagerNet/sing-box/releases/download/v$SB
           (cd desktop/helper && CGO_ENABLED=0 go build -o ../../ins-helper$([ "$RUNNER_OS" = Windows ] && echo .exe) .)

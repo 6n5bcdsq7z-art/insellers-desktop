@@ -55,9 +55,13 @@ for o in cfg["outbounds"]:
                 SERVERS.update(i[4][0] for i in socket.getaddrinfo(h, 443, socket.AF_INET))
             except OSError:
                 pass
-rc, base_ip = curl("https://ifconfig.me")
-_, base_ip6 = curl("https://ifconfig.me", ["-6"], 8)
-if rc != 0 or not valid_ip(base_ip) or not SERVERS:
+baselines = []
+for source in ("https://api.ipify.org", "https://ifconfig.me"):
+    rc, base = curl(source)
+    _, base6 = curl(source, ["-6"], 8)
+    if rc == 0 and valid_ip(base):
+        baselines.append((source, base, base6))
+if not baselines or not SERVERS:
     print("::error title=TUN acceptance blocked::Baseline public IP or VPN endpoint resolution is unavailable.")
     sys.exit(1)
 
@@ -90,18 +94,27 @@ threading.Thread(target=heartbeat, daemon=True).start()
 
 # Establish a working core/profile before testing OS routes. A stale test key or
 # unreachable endpoint must not be reported as a TUN/DNS implementation failure.
-rc, proxy_ip = curl("https://ifconfig.me", ["--proxy", "http://127.0.0.1:38809"])
-proxy_identity = rc == 0 and valid_ip(proxy_ip) and proxy_ip not in (base_ip, base_ip6)
-ok("preflight: core/profile changes public IP before TUN", proxy_identity)
+proxy_identity = False
+IP_URL, base_ip, base_ip6 = baselines[0]
+for source, base, base6 in baselines:
+    rc, proxy_ip = curl(source, ["--proxy", "http://127.0.0.1:38812"])
+    changed = rc == 0 and valid_ip(proxy_ip) and proxy_ip not in (base, base6)
+    facts = {"source":source,"curl_exit":rc,"valid_ip":valid_ip(proxy_ip),"changed":changed}
+    print("::notice title=Core probe evidence::" + json.dumps(facts))
+    if changed:
+        proxy_identity = True
+        IP_URL, base_ip, base_ip6 = source, base, base6
+        break
+ok("preflight: forced remote core changes public IP before TUN", proxy_identity)
 with tempfile.TemporaryDirectory() as payload_dir:
     probe = subprocess.run([
         "curl", "-fsS", "--proto", "=https", "--connect-timeout", "5", "-m", "15",
-        "--proxy", "http://127.0.0.1:38809", "-o", os.path.join(payload_dir, "probe.bin"),
+        "--proxy", "http://127.0.0.1:38812", "-o", os.path.join(payload_dir, "probe.bin"),
         "-w", "%{http_code}:%{size_download}", "https://vpn.insellers.su/probe/32k",
     ], capture_output=True, text=True)
     parts = probe.stdout.split(":")
     payload_ok = probe.returncode == 0 and len(parts) == 2 and parts[0] == "200" and float(parts[1]) >= 32768
-ok("preflight: core/profile transfers 32 KiB before TUN", payload_ok)
+ok("preflight: forced remote core transfers 32 KiB before TUN", payload_ok)
 if not proxy_identity or not payload_ok:
     # Publish categories only, never the test key, endpoint or raw configuration.
     try:
@@ -123,7 +136,7 @@ if not proxy_identity or not payload_ok:
 r = helper({"cmd": "up", "token": token, "socks": 38808, "bypass": sorted(SERVERS), "dns": "udp"})
 ok("helper up", r.get("ok"), json.dumps(r, ensure_ascii=False))
 time.sleep(5)
-rc, ip = curl("https://ifconfig.me")
+rc, ip = curl(IP_URL)
 # выход через туннель = адрес сервера (IPv4 или IPv6 сервера - сервер сам выходит по IPv6), не адрес раннера
 ok("1. curl ifconfig.me без прокси = другой подтверждённый IP", rc == 0 and valid_ip(ip) and ip not in (base_ip, base_ip6))
 try:
@@ -163,12 +176,12 @@ time.sleep(2)
 lg = xlog()
 ok("4. RU-сайт (ya.ru) - через ядро, напрямую (RU-direct)",
    any(("ya.ru:443 [socks-in" in l or any(f"{a}:443 [socks-in" in l for a in ya)) and "direct]" in l for l in lg.splitlines()), str(ya))
-rc6, ip6 = curl("https://ifconfig.me", ["-6"], 8)
+rc6, ip6 = curl(IP_URL, ["-6"], 8)
 ok("5. IPv6 мимо туннеля не утекает (нет своего IPv6 раннера)", rc6 != 0 or not ip6 or ip6 != base_ip6, f"rc={rc6} {ip6}")
 r = helper({"cmd": "down", "token": token})
 ok("helper down authorized", r.get("ok"))
 time.sleep(3)
-rc, ip = curl("https://ifconfig.me")
+rc, ip = curl(IP_URL)
 ok("6. «Отключить»: снова свой IP, интернет работает", rc == 0 and ip == base_ip, ip)
 # ядро упало - помощник сам снимает TUN (3 проверки по 5 с), интернет не остаётся мёртвым
 r = helper({"cmd": "up", "token": token, "socks": 38808, "bypass": sorted(SERVERS), "dns": "udp"})
@@ -179,7 +192,7 @@ else:
     subprocess.run(["pkill", "-x", "xray"], capture_output=True)
 time.sleep(25)
 st = helper({"cmd": "status"})
-rc, ip = curl("https://ifconfig.me")
+rc, ip = curl(IP_URL)
 ok("7. ядро упало - помощник снял TUN, интернет работает", (not st.get("running")) and rc == 0 and ip == base_ip, f"{st} {ip}")
 print("\n=== ИТОГ ===")
 for n, c, i in results:
