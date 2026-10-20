@@ -2,12 +2,24 @@
 """Проверка механизма TUN на раннере (macOS/Windows): ядро xray с конфигурацией тестового ключа + ins-helper + sing-box.
 Секрет TUN_TEST_CONFIG - клиентская конфигурация (как у приложения: socks 38808, http 38809). Печатает итог, код 1 - провал.
 Что НЕ проверить на раннере: сон/пробуждение, смена Wi-Fi, реальный пароль администратора / окно UAC."""
-import atexit, ipaddress, json, os, platform, socket, subprocess, sys, tempfile, threading, time
+import atexit, ipaddress, json, os, platform, socket, subprocess, sys, tempfile, threading, time, traceback
 
 WIN = platform.system() == "Windows"
 HD = r"C:\Program Files\INSELLERS VPN Helper" if WIN else "/Library/PrivilegedHelperTools/su.insellers.helper"
 SERVERS = set()
 results = []
+
+def unexpected(kind, value, tb):
+    # Keep the detailed traceback private; annotations contain no profile data.
+    fd = os.open("tun-exception.private.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "w") as log:
+        traceback.print_exception(kind, value, tb, file=log)
+    last = tb
+    while last.tb_next is not None:
+        last = last.tb_next
+    print("::error title=TUN acceptance exception::" + kind.__name__
+          + " in " + last.tb_frame.f_code.co_name + ":" + str(last.tb_lineno), flush=True)
+sys.excepthook = unexpected
 
 
 def ok(name, cond, info=""):

@@ -91,7 +91,7 @@ jobs:
             powershell -Command "Start-Process -FilePath 'C:\Program Files\INSELLERS VPN Helper\ins-helper.exe' -WindowStyle Hidden"
           else
             D=/Library/PrivilegedHelperTools/su.insellers.helper
-            sudo mkdir -p $D && sudo cp ins-helper sing-box $D/ && echo testtoken0123456789 | sudo tee $D/token >/dev/null && sudo chown "$(id -un)" $D/token && sudo chmod 600 $D/token
+            sudo mkdir -p $D && sudo chmod 755 $D && sudo cp ins-helper sing-box $D/ && echo testtoken0123456789 | sudo tee $D/token >/dev/null && sudo chown "$(id -un)" $D/token && sudo chmod 600 $D/token
             sudo nohup $D/ins-helper >/dev/null 2>&1 &
           fi
           XRAY_LOCATION_ASSET=$PWD nohup ./xray run -c client.json > xray.out 2>&1 &
