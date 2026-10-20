@@ -167,7 +167,6 @@ const API_PORT: u16 = 38813;
 pub const PAGE_PORT: u16 = 38815;
 /// 27.09 (п.5): счётчики трафика ядра по выходам (xray metrics, /debug/vars) - мгновенное обнаружение заморозки
 const METRICS_PORT: u16 = 38814;
-const PROBE_URL: &str = "https://vpn.insellers.su/probe/";
 
 #[derive(Default)]
 pub struct VpnState {
@@ -687,65 +686,17 @@ async fn freeze_watch(app: AppHandle, dir: PathBuf, gen: u32, choice: String) {
 async fn probe_real(size: &str) -> (bool, u64, u64, String) { probe_real_t(size, 15).await }
 
 async fn probe_real_t(size: &str, secs: u64) -> (bool, u64, u64, String) {
-    let want: u64 = if size == "32k" { 32_768 } else { 262_144 };
-    let t0 = std::time::Instant::now();
-    let ms = |t: std::time::Instant| t.elapsed().as_millis() as u64;
-    let client = match reqwest::Proxy::all(format!("http://127.0.0.1:{PROBE_PORT}"))
-        .and_then(|p| reqwest::Client::builder().proxy(p).timeout(Duration::from_secs(secs)).build()) {
-        Ok(c) => c, Err(_) => return (false, 0, 0, "io".into()),
-    };
-    let url = format!("{PROBE_URL}{size}?r={}", crate::now_ms());
-    let mut resp = match client.get(&url).header("Cache-Control", "no-cache").send().await {
-        Ok(r) => r,
-        Err(e) => {
-            let why = if e.is_connect() && t0.elapsed() < Duration::from_millis(500) { "core" } else if e.is_timeout() { "timeout" } else { "io" };
-            return (false, 0, ms(t0), why.into());
-        }
-    };
-    let code = resp.status().as_u16();
-    if code != 200 { return (false, 0, ms(t0), format!("http {code}")); }
-    let mut got: u64 = 0;
-    loop {
-        match resp.chunk().await {
-            Ok(Some(b)) => { got += b.len() as u64; if got >= want { break; } }
-            Ok(None) => break,
-            Err(_) => break,
-        }
-    }
-    if got >= want { (true, got, ms(t0), String::new()) }
-    else { (false, got, ms(t0), if got > 0 { "short".into() } else { "timeout".into() }) }
+    crate::traffic_probe::check(PROBE_PORT, if size == "32k" { 32_768 } else { 262_144 }, Duration::from_secs(secs)).await
 }
+
 fn kbps(bytes: u64, ms: u64) -> u64 { if ms == 0 { 0 } else { bytes * 1000 / ms / 1024 } }
 
-/// 29.09 (владелец: Mac после сна «Подключено», а интернета нет): проверка ЧЕРЕЗ туннель - (ok, мс, как). Xray - реальная
-/// загрузка 32 КБ с нашего сервера через путь (вход probe-in) или generate_204 через локальный вход; AmneziaWG - generate_204
-/// через локальный вход (у wireproxy нет входа проверки). До ~10 с. Её же вызывает страница: InsellersNative.probe().
+/// Проверка ЧЕРЕЗ туннель: 32 КБ, два независимых HTTPS-источника, один срок.
+/// AWG использует обычный локальный вход; Xray — вход, закреплённый за выбранным путём.
 pub async fn tunnel_check() -> (bool, u64, String) {
-    let t0 = std::time::Instant::now();
-    if cur_path() != "awg" {
-        let (ok, _b, ms, why) = probe_real_t("32k", 6).await;
-        if ok { return (true, ms, "real32k".into()); }
-        if why == "core" { return (false, ms, "core".into()); }
-    }
-    let client = match reqwest::Proxy::all(format!("http://127.0.0.1:{HTTP_PORT}"))
-        .and_then(|p| reqwest::Client::builder().proxy(p).timeout(Duration::from_secs(4)).build()) { Ok(c) => c, Err(_) => return (false, 0, "io".into()) };
-    for u in ["http://connectivitycheck.gstatic.com/generate_204", "http://cp.cloudflare.com/generate_204"] {
-        if let Ok(r) = client.get(u).send().await {
-            let s = r.status().as_u16();
-            if s == 204 || s == 200 { return (true, t0.elapsed().as_millis() as u64, "204".into()); }
-        }
-    }
-    if telegram_ok(&client).await { return (true, t0.elapsed().as_millis() as u64, "telegram_only".into()); }
-    (false, t0.elapsed().as_millis() as u64, "fail".into())
-}
-
-/// 29.09 (владелец): ограниченный режим / гостевой доступ = «только Telegram»: generate_204 и наш сервер закрыты НАМЕРЕННО.
-/// Telegram через туннель отвечает (любой HTTP-ответ) - связь есть, это не «нет интернета», переподключать нельзя.
-async fn telegram_ok(client: &reqwest::Client) -> bool {
-    for u in ["https://api.telegram.org/", "https://web.telegram.org/"] {
-        if client.get(u).send().await.is_ok() { return true; }
-    }
-    false
+    let port = if cur_path() == "awg" { HTTP_PORT } else { PROBE_PORT };
+    let (ok, _, ms, why) = crate::traffic_probe::check(port, 32_768, Duration::from_secs(8)).await;
+    (ok, ms, if ok { "real32k".into() } else { why })
 }
 
 static LAST_FORCED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1088,24 +1039,8 @@ fn launch_router(app: &AppHandle, dir: &PathBuf) -> Result<(), String> {
 /// Открывается ли внешний сайт ЧЕРЕЗ наш локальный вход (путь реально пропускает трафик). До ~9 с.
 async fn link_ok() -> bool { link_ok_within(9).await }
 async fn link_ok_within(secs: u64) -> bool {
-    let client = match reqwest::Proxy::all(format!("http://127.0.0.1:{HTTP_PORT}"))
-        .and_then(|p| reqwest::Client::builder().proxy(p).timeout(Duration::from_secs(4)).build()) { Ok(c) => c, Err(_) => return false };
-    let t0 = std::time::Instant::now();
     tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_millis(700))).await.ok();
-    while t0.elapsed() < Duration::from_secs(secs) {
-        for u in ["http://cp.cloudflare.com/generate_204", "http://connectivitycheck.gstatic.com/generate_204", "https://vpn.insellers.su/probe/204"] {
-            let remaining = Duration::from_secs(secs).saturating_sub(t0.elapsed());
-            if remaining.is_zero() { return false; }
-            if let Ok(r) = client.get(u).timeout(remaining.min(Duration::from_secs(4))).send().await {
-                let s = r.status().as_u16();
-                if s == 204 || s == 200 { return true; }
-            }
-        }
-        let wait = Duration::from_millis(800).min(Duration::from_secs(secs).saturating_sub(t0.elapsed()));
-        if wait.is_zero() { break; }
-        tauri::async_runtime::spawn_blocking(move || std::thread::sleep(wait)).await.ok();
-    }
-    false
+    crate::traffic_probe::check(HTTP_PORT, 32_768, Duration::from_secs(secs)).await.0
 }
 /// Есть ли интернет вообще, без VPN (чтобы не менять путь, когда пропала сама сеть).
 async fn direct_ok() -> bool {
@@ -1396,9 +1331,6 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         let path = dir.join("config.json");
         let total = cands.len();
         let mut ok_cfg: Option<Vec<u8>> = None;
-        let mut soft: Option<(usize, String, String, Vec<u8>)> = None;   // прошёл 204, но не загрузку
-        let mut hard: Option<(usize, String, String, Vec<u8>)> = None;   // не прошёл даже 204
-        let n_cands = cands.len();
         for (i, (tag, cfg)) in cands.into_iter().enumerate() {
             if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
             if i > 0 { notify(&app, "connecting", &format!("Путь не отвечает - пробуем другой ({}/{})…", i + 1, total)); }
@@ -1407,49 +1339,21 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
             launch(&app, "xray", vec!["run".into(), "-c".into(), path.to_string_lossy().to_string()], &dir)?;
             if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
             let desc = path_desc(&cfg);
-            if link_ok().await {
-                // 26.09 этап 2: 204 проходит и по «замороженному» оператором пути (ТСПУ режет TCP после ~16-25 КБ) -
-                // проверяем ещё реальной загрузкой 32 КБ через этот путь
-                let (rok, rb, rms, why) = probe_real("32k").await;
-                if rok || why == "core" || why.starts_with("http ") {
-                    crate::remote_log("vpn.path_ok", json!({"path": tag, "desc": desc, "try": i + 1, "kbps": kbps(rb, rms), "how": "real32k"}));
-                    set_cur_path(&tag); set_cur_desc(&desc);
-                    ok_cfg = Some(bytes);
-                    break;
-                }
-                crate::remote_log("vpn.path_dead", json!({"path": tag, "desc": desc, "try": i + 1, "reason": why, "kb": rb / 1024, "ms": rms, "stage": "start"}));
-                if soft.is_none() { soft = Some((i, tag.clone(), desc.clone(), bytes.clone())); }
-            } else {
-                crate::remote_log("vpn.path_dead", json!({"path": tag, "desc": desc, "try": i + 1, "reason": "no204", "stage": "start"}));
-                if hard.is_none() { hard = Some((i, tag.clone(), desc.clone(), bytes.clone())); }
+            tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_millis(700))).await.ok();
+            let (ok, transferred, ms, why) = probe_real_t("32k", 9).await;
+            if ok {
+                crate::remote_log("vpn.path_ok", json!({"path": tag, "desc": desc, "try": i + 1,
+                    "kbps": kbps(transferred, ms), "bytes": transferred, "how": "real32k"}));
+                set_cur_path(&tag); set_cur_desc(&desc);
+                ok_cfg = Some(bytes);
+                break;
             }
+            crate::remote_log("vpn.path_dead", json!({"path": tag, "desc": desc, "try": i + 1,
+                "reason": why, "kb": transferred / 1024, "ms": ms, "stage": "start"}));
             mark_bad(&tag);
             kill_child(&app);
         }
-        // загрузку не прошёл ни один путь, а 204 прошёл - скорее сбой нашего сервера проверки, чем всех путей: подключаемся
-        // по первому такому (как до 26.09), не оставляем человека без связи
-        if ok_cfg.is_none() {
-            if let Some((i, tag, desc, bytes)) = soft {
-                if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
-                std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
-                launch(&app, "xray", vec!["run".into(), "-c".into(), path.to_string_lossy().to_string()], &dir)?;
-                if link_ok().await {
-                    crate::remote_log("vpn.path_ok", json!({"path": tag, "desc": desc, "try": i + 1, "how": "204only", "of": n_cands}));
-                    set_cur_path(&tag); set_cur_desc(&desc);
-                    ok_cfg = Some(bytes);
-                } else { kill_child(&app); }
-            } else if let Some((i, tag, desc, bytes)) = hard {
-                // 15.10 (владелец, Теле2): проверка 204 может не проходить из-за DPI/ТСПУ, хотя сам
-                // туннель жив. Ни один путь не прошёл 204 - подключаемся по первому без перепроверки:
-                // жив ли он, дальше проверит сторож по трафику и переключит при необходимости.
-                if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
-                std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
-                launch(&app, "xray", vec!["run".into(), "-c".into(), path.to_string_lossy().to_string()], &dir)?;
-                crate::remote_log("vpn.path_ok", json!({"path": tag, "desc": desc, "try": i + 1, "how": "besteffort", "of": n_cands}));
-                set_cur_path(&tag); set_cur_desc(&desc);
-                ok_cfg = Some(bytes);
-            }
-        }
+        // Never cache or activate a path for which no payload was transferred.
         match ok_cfg {
             Some(b) => { if !token.is_empty() { let _ = save_profile(&last, &b, &token, &url, &choice); } }   // запасная копия - только проверенная
             None if manual_choice(&choice) => return Err("Выбранный протокол не отвечает. Выберите другой сервер или протокол".into()),
@@ -1629,28 +1533,21 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                 }
             }
             if cur_gen(&h) != watch_gen || !wanted(&h) { break; }
-            // 29.09: ограниченный режим / гость - 204 и наш сервер закрыты намеренно; Telegram отвечает - связь в порядке, дальше не проверяем
-            if !ok && telegram_ok(&client).await {
-                if degraded { degraded = false; notify(&h, "connected", ""); }
-                fails = 0; mark(&h, 1);
-                tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_secs(30))).await.ok();
-                continue;
-            }
             n += 1;
-            // реальная загрузка (не для AmneziaWG: у wireproxy нет входа проверки)
+            // A heartbeat cannot clear a previous payload failure.
             let mut path_ok = ok;
             let mut dead_why = String::from("no204");
             let (mut got, mut took) = (0u64, 0u64);
-            if !is_awg && (!ok || n % 5 == 0) {
-                let (mut rok, mut rb, mut rms, mut why) = probe_real("256k").await;
+            if !ok || degraded || fails > 0 || n % 5 == 0 {
+                let port = if is_awg { HTTP_PORT } else { PROBE_PORT };
+                let (mut rok, mut rb, mut rms, mut why) = crate::traffic_probe::check(port, 262_144, Duration::from_secs(15)).await;
                 if !rok && why != "core" && !why.starts_with("http ") {
                     tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_millis(1500))).await.ok();
-                    (rok, rb, rms, why) = probe_real("256k").await;
+                    (rok, rb, rms, why) = crate::traffic_probe::check(port, 262_144, Duration::from_secs(15)).await;
                 }
                 if cur_gen(&h) != watch_gen || !wanted(&h) { break; }
                 got = rb; took = rms;
-                if why == "core" || why.starts_with("http ") { path_ok = ok; }   // вход проверки/наш сервер - не путь
-                else { path_ok = rok; dead_why = why; }
+                path_ok = rok; dead_why = why;
                 if rok && crate::now_ms().saturating_sub(last_ok_log) > 15 * 60 * 1000 {
                     last_ok_log = crate::now_ms();
                     crate::remote_log("vpn.path_ok", json!({"path": cur_path(), "desc": cur_desc(), "kbps": kbps(rb, rms), "ms": rms, "how": "real256k"}));

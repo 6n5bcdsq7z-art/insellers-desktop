@@ -6,6 +6,7 @@
 
 mod vpn;
 mod connection_guard;
+mod traffic_probe;
 mod check;
 mod probe;
 mod tun;

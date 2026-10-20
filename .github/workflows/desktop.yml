@@ -160,6 +160,32 @@ jobs:
           gunzip -c "$T" > "${T%.gz}"
           npx tauri signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "${T%.gz}" > /dev/null
           ls -la "${T%.gz}.sig"; rm -f "${T%.gz}"
+      - name: Verify macOS bundle and native architectures
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          APP=$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -type d | head -1)
+          test -n "$APP"
+          codesign --verify --deep --strict "$APP"
+          EXE=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$APP/Contents/Info.plist")
+          for binary in "$EXE" xray wireproxy ins-helper sing-box; do
+            test -x "$APP/Contents/MacOS/$binary"
+            lipo "$APP/Contents/MacOS/$binary" -verify_arch arm64 x86_64
+          done
+          # This verifies bundle integrity, not Developer ID notarization.
+      - name: macOS process startup smoke on clean CI runner
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          APP=$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -type d | head -1)
+          EXE=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$APP/Contents/Info.plist")
+          "$APP/Contents/MacOS/$EXE" > "$RUNNER_TEMP/insellers-startup.log" 2>&1 &
+          APP_PID=$!
+          trap 'kill "$APP_PID" 2>/dev/null || true' EXIT
+          sleep 12
+          kill -0 "$APP_PID"
+          # No user profile, VPN credentials or privileged helper is installed.
+          # A live process is not a physical-device login or tunnel acceptance.
       - name: Лог ошибки → ветка ci-logs (чтобы разбирать без доступа к Actions UI)
         if: failure()
         env:
