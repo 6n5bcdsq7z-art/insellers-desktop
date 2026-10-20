@@ -1061,6 +1061,8 @@ fn http() -> Result<reqwest::Client, String> {
     if let Ok(v) = reqwest::header::HeaderValue::from_str(os) { h.insert("x-device-os", v); }
     if let Ok(v) = reqwest::header::HeaderValue::from_str(&crate::host_model()) { h.insert("x-device-model", v); }
     reqwest::Client::builder()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
         .default_headers(h)
         .timeout(Duration::from_secs(20))
         .user_agent(format!("InsellersVPN/desktop-{}", env!("CARGO_PKG_VERSION")))
@@ -1560,7 +1562,8 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                 let mut hd = reqwest::header::HeaderMap::new();
                 if let Ok(v) = reqwest::header::HeaderValue::from_str(&format!("ins-{}", crate::install_id())) { hd.insert("x-hwid", v); }
                 let via = reqwest::Proxy::all(format!("http://127.0.0.1:{HTTP_PORT}"))
-                    .and_then(|p| reqwest::Client::builder().proxy(p).default_headers(hd).timeout(Duration::from_secs(15)).build());
+                    .and_then(|p| reqwest::Client::builder().proxy(p).https_only(true)
+                        .redirect(reqwest::redirect::Policy::none()).default_headers(hd).timeout(Duration::from_secs(15)).build());
                 let mut body: Option<String> = None;
                 if let Ok(pc) = via {
                     if let Ok(u) = sub_url(&pc, &h_token).await {
