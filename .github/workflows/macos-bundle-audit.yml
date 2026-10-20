@@ -7,10 +7,10 @@ on:
     inputs:
       version:
         required: true
-        default: '1.0.169'
+        default: '1.0.171'
       sha256:
         required: true
-        default: 'e227864087f2ffc3bdbda43878d5c78b8d114424491d8c357198570cc881de61'
+        default: '0441dc501d1fa30e85bb5008bc39abc78d947baf5528dc007183a7b5f46a9bba'
 permissions:
   contents: read
 jobs:
@@ -23,8 +23,8 @@ jobs:
           python-version: '3.13'
       - name: Inspect package without executing it
         env:
-          CANDIDATE_VERSION: ${{ inputs.version || '1.0.169' }}
-          CANDIDATE_SHA256: ${{ inputs.sha256 || 'e227864087f2ffc3bdbda43878d5c78b8d114424491d8c357198570cc881de61' }}
+          CANDIDATE_VERSION: ${{ inputs.version || '1.0.171' }}
+          CANDIDATE_SHA256: ${{ inputs.sha256 || '0441dc501d1fa30e85bb5008bc39abc78d947baf5528dc007183a7b5f46a9bba' }}
         run: |
           python3 - <<'PY'
           import hashlib, os, pathlib, plistlib, re, subprocess, tarfile, urllib.request
