@@ -12,11 +12,34 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - name: Check isolated test configuration without displaying it
+        env:
+          CFG: ${{ secrets.TUN_TEST_CONFIG }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          value = os.environ.get("CFG", "").strip()
+          if not value:
+              print("::error title=TUN acceptance blocked::TUN_TEST_CONFIG is not configured; no live tunnel acceptance is possible.")
+              raise SystemExit(1)
+          try:
+              cfg = json.loads(value)
+              assert isinstance(cfg.get("inbounds"), list) and isinstance(cfg.get("outbounds"), list)
+              assert any(o.get("protocol") not in ("freedom", "blackhole", "dns") for o in cfg["outbounds"])
+          except Exception:
+              print("::error title=TUN acceptance blocked::Test configuration is invalid; contents were not logged.")
+              raise SystemExit(1)
+          if any(os.environ.get(k) for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")):
+              print("::error title=TUN acceptance blocked::Runner has a managed proxy; direct system-routing test cannot bypass it.")
+              raise SystemExit(1)
+          print("Isolated test configuration present; contents not logged.")
+          PY
       - uses: actions/setup-go@v5
         with: { go-version: "1.26.x", cache: false }
       - name: Ядро, sing-box, помощник, гео
@@ -24,6 +47,7 @@ jobs:
           CFG: ${{ secrets.TUN_TEST_CONFIG }}
         run: |
           set -e
+          umask 077
           printf '%s' "$CFG" > client.json
           SB=$(cat desktop/helper/sing-box.version); X=https://github.com/XTLS/Xray-core/releases/download/v26.3.27
           G=https://github.com/SagerNet/sing-box/releases/download/v$SB
@@ -47,19 +71,16 @@ jobs:
             powershell -Command "Start-Process -FilePath 'C:\Program Files\INSELLERS VPN Helper\ins-helper.exe' -WindowStyle Hidden"
           else
             D=/Library/PrivilegedHelperTools/su.insellers.helper
-            sudo mkdir -p $D && sudo cp ins-helper sing-box $D/ && echo testtoken0123456789 | sudo tee $D/token >/dev/null && sudo chmod 644 $D/token
+            sudo mkdir -p $D && sudo cp ins-helper sing-box $D/ && echo testtoken0123456789 | sudo tee $D/token >/dev/null && sudo chown "$(id -un)" $D/token && sudo chmod 600 $D/token
             sudo nohup $D/ins-helper >/dev/null 2>&1 &
           fi
           XRAY_LOCATION_ASSET=$PWD nohup ./xray run -c client.json > xray.out 2>&1 &
-          sleep 5; tail -3 xray.out
+          sleep 5
       - name: Проверки
         env:
           PYTHONIOENCODING: utf-8
         run: $( [ "$RUNNER_OS" = Windows ] && echo python || echo python3 ) .github/tun_test.py
-      - name: Журналы
+      - name: Retain private logs on the ephemeral runner
         if: always()
         run: |
-          D=$([ "$RUNNER_OS" = Windows ] && echo "/c/Program Files/INSELLERS VPN Helper" || echo /Library/PrivilegedHelperTools/su.insellers.helper)
-          echo "--- helper.log"; sudo cat "$D/helper.log" 2>/dev/null || cat "$D/helper.log" 2>/dev/null
-          echo "--- sing-box.log"; sudo tail -80 "$D/sing-box.log" 2>/dev/null || tail -40 "$D/sing-box.log" 2>/dev/null
-          echo "--- xray (последние)"; tail -40 xray-access.log 2>/dev/null | sed -E 's/email: \S+//'
+          echo "Only sanitized acceptance results are published. Profiles and raw core logs are not printed or uploaded."

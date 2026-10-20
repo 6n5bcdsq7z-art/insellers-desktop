@@ -2,7 +2,7 @@
 """Проверка механизма TUN на раннере (macOS/Windows): ядро xray с конфигурацией тестового ключа + ins-helper + sing-box.
 Секрет TUN_TEST_CONFIG - клиентская конфигурация (как у приложения: socks 38808, http 38809). Печатает итог, код 1 - провал.
 Что НЕ проверить на раннере: сон/пробуждение, смена Wi-Fi, реальный пароль администратора / окно UAC."""
-import json, os, platform, socket, subprocess, sys, time
+import atexit, ipaddress, json, os, platform, socket, subprocess, sys, threading, time
 
 WIN = platform.system() == "Windows"
 HD = r"C:\Program Files\INSELLERS VPN Helper" if WIN else "/Library/PrivilegedHelperTools/su.insellers.helper"
@@ -12,22 +12,30 @@ results = []
 
 def ok(name, cond, info=""):
     results.append((name, bool(cond), info))
-    print(("PASS " if cond else "FAIL ") + name + (" - " + info if info else ""), flush=True)
+    print(("PASS " if cond else "FAIL ") + name, flush=True)
+    print(("::notice" if cond else "::error") + " title=TUN acceptance::" + name, flush=True)
 
 
 def helper(req, t=25):
-    s = socket.create_connection(("127.0.0.1", 38811), 5); s.settimeout(t)
-    s.sendall((json.dumps(req) + "\n").encode()); d = b""
-    while not d.endswith(b"\n"):
-        x = s.recv(4096)
-        if not x: break
-        d += x
+    with socket.create_connection(("127.0.0.1", 38811), 5) as s:
+        s.settimeout(t)
+        s.sendall((json.dumps(req) + "\n").encode()); d = b""
+        while not d.endswith(b"\n"):
+            x = s.recv(4096)
+            if not x: break
+            d += x
     return json.loads(d or b"{}")
 
 
 def curl(url, extra=(), t=15):
-    r = subprocess.run(["curl", "-s", "-m", str(t)] + list(extra) + [url], capture_output=True, text=True)
+    r = subprocess.run(["curl", "-fsS", "--proto", "=https", "--connect-timeout", "5", "-m", str(t)] + list(extra) + [url], capture_output=True, text=True)
     return r.returncode, r.stdout.strip()
+
+def valid_ip(value):
+    try:
+        return ipaddress.ip_address(value).is_global
+    except ValueError:
+        return False
 
 
 def xlog():
@@ -47,10 +55,11 @@ for o in cfg["outbounds"]:
                 SERVERS.update(i[4][0] for i in socket.getaddrinfo(h, 443, socket.AF_INET))
             except OSError:
                 pass
-print("servers:", SERVERS)
-_, base_ip = curl("https://ifconfig.me")
+rc, base_ip = curl("https://ifconfig.me")
 _, base_ip6 = curl("https://ifconfig.me", ["-6"], 8)
-print("runner ip:", base_ip, "ipv6:", base_ip6 or "нет")
+if rc != 0 or not valid_ip(base_ip) or not SERVERS:
+    print("::error title=TUN acceptance blocked::Baseline public IP or VPN endpoint resolution is unavailable.")
+    sys.exit(1)
 
 
 def resolver_ip():
@@ -62,17 +71,29 @@ def resolver_ip():
 
 
 base_res = resolver_ip()
-print("resolver до TUN:", base_res)
-if not WIN:
-    print(subprocess.run(["scutil", "--dns"], capture_output=True, text=True).stdout[:1500])
 token = open(os.path.join(HD, "token")).read().strip()
+heartbeat_stop = threading.Event()
+def cleanup():
+    heartbeat_stop.set()
+    try:
+        helper({"cmd": "down", "token": token})
+    except Exception:
+        print("::warning title=TUN cleanup::Could not confirm helper shutdown; runner watchdog still applies.")
+atexit.register(cleanup)
+def heartbeat():
+    while not heartbeat_stop.wait(10):
+        try:
+            helper({"cmd": "ping"}, 5)
+        except Exception:
+            pass
+threading.Thread(target=heartbeat, daemon=True).start()
 
 r = helper({"cmd": "up", "token": token, "socks": 38808, "bypass": sorted(SERVERS), "dns": "udp"})
 ok("helper up", r.get("ok"), json.dumps(r, ensure_ascii=False))
 time.sleep(5)
 rc, ip = curl("https://ifconfig.me")
 # выход через туннель = адрес сервера (IPv4 или IPv6 сервера - сервер сам выходит по IPv6), не адрес раннера
-ok("1. curl ifconfig.me без прокси = выход через сервер VPN", bool(ip) and ip not in (base_ip, base_ip6), f"{ip} (раннер {base_ip})")
+ok("1. curl ifconfig.me без прокси = другой подтверждённый IP", rc == 0 and valid_ip(ip) and ip not in (base_ip, base_ip6))
 try:
     socket.getaddrinfo("t%d.example.org" % int(time.time()), 443)   # новое имя - без кеша
 except OSError:
@@ -83,18 +104,23 @@ try:
 except OSError:
     dns_ok = False
 ok("3a. DNS через TUN работает", dns_ok)
-subprocess.run(["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-T", "git@github.com"],
-               capture_output=True, text=True, timeout=30)
+# Read a public SSH banner only; no credentials, host-key bypass or login.
+try:
+    with socket.create_connection(("github.com", 22), 10) as s:
+        s.settimeout(10)
+        banner_ok = s.recv(128).startswith(b"SSH-")
+except OSError:
+    banner_ok = False
 time.sleep(1)
 lg = xlog()
-ok("2. ssh (github.com:22) идёт через ядро VPN", ":22 [socks-in" in lg,
+ok("2. SSH banner (github.com:22) идёт через ядро VPN", banner_ok and ":22 [socks-in" in lg,
    next((l[:160] for l in lg.splitlines() if ":22 [socks-in" in l), "нет строки в журнале ядра"))
 time.sleep(2)
 lg = xlog()
 ok("3b. DNS-запросы системы уходят в ядро (dns-out), не мимо", "-> dns-out]" in lg or ">> dns-out]" in lg,
    f"строк dns-out: {lg.count('dns-out]')}")
 tun_res = resolver_ip()
-ok("3c. нет утечки DNS: резолвер в TUN не резолвер раннера", bool(tun_res) and not (set(tun_res) & set(base_res)),
+ok("3c. резолвер в TUN отличается от исходного (не полная проверка утечек)", bool(tun_res) and not (set(tun_res) & set(base_res)),
    f"до {base_res} -> в TUN {tun_res}")
 ya = sorted({i[4][0] for i in socket.getaddrinfo("ya.ru", 443, socket.AF_INET)})
 curl("https://ya.ru/")
@@ -104,7 +130,8 @@ ok("4. RU-сайт (ya.ru) - через ядро, напрямую (RU-direct)",
    any(("ya.ru:443 [socks-in" in l or any(f"{a}:443 [socks-in" in l for a in ya)) and "direct]" in l for l in lg.splitlines()), str(ya))
 rc6, ip6 = curl("https://ifconfig.me", ["-6"], 8)
 ok("5. IPv6 мимо туннеля не утекает (нет своего IPv6 раннера)", rc6 != 0 or not ip6 or ip6 != base_ip6, f"rc={rc6} {ip6}")
-r = helper({"cmd": "down"})
+r = helper({"cmd": "down", "token": token})
+ok("helper down authorized", r.get("ok"))
 time.sleep(3)
 rc, ip = curl("https://ifconfig.me")
 ok("6. «Отключить»: снова свой IP, интернет работает", rc == 0 and ip == base_ip, ip)
@@ -121,5 +148,5 @@ rc, ip = curl("https://ifconfig.me")
 ok("7. ядро упало - помощник снял TUN, интернет работает", (not st.get("running")) and rc == 0 and ip == base_ip, f"{st} {ip}")
 print("\n=== ИТОГ ===")
 for n, c, i in results:
-    print(("✅ " if c else "❌ ") + n + (" - " + i if i else ""))
+    print(("✅ " if c else "❌ ") + n)
 sys.exit(0 if all(c for _, c, _ in results) else 1)
