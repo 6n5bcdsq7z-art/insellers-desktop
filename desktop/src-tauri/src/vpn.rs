@@ -18,6 +18,14 @@ fn external_connection() -> Vec<String> {
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
         let connections = crate::connection_guard::connected_network_extensions(&output);
         if !connections.is_empty() { return connections; }
+        if !crate::tun::active() {
+            let routes = std::process::Command::new("/usr/sbin/netstat").args(["-rn", "-f", "inet"])
+                .output().ok().filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+            if crate::connection_guard::routed_tunnel(&routes).is_some() {
+                return vec!["другой VPN с системным туннелем".to_owned()];
+            }
+        }
     }
     match sysproxy::Sysproxy::get_system_proxy() {
         Ok(p) if crate::connection_guard::foreign_proxy(p.enable, &p.host, p.port, HTTP_PORT, SOCKS_PORT) =>
