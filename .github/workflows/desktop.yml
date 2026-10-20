@@ -144,6 +144,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -o pipefail
+          # Candidate bundles still need a complete code seal. This is ad-hoc
+          # integrity signing, not Developer ID or Apple notarization.
+          if [ "$RUNNER_OS" = "macOS" ]; then export APPLE_SIGNING_IDENTITY="-"; fi
           npx tauri build ${{ matrix.args }} 2>&1 | tee ../build-${{ matrix.os }}.log
       - name: Подпись распакованного .app.tar (дельта-обновления Mac, 27.09)
         # Приложение собирает новый .app.tar из своей базы и патча (~2 МБ вместо ~68 МБ) и проверяет ЭТУ подпись тем же
@@ -166,7 +169,15 @@ jobs:
           set -euo pipefail
           APP=$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -type d | head -1)
           test -n "$APP"
-          codesign --verify --deep --strict "$APP"
+          if ! codesign --verify --deep --strict "$APP" > "$RUNNER_TEMP/bundle-signature.log" 2>&1; then
+            python3 - <<'PY'
+          import os
+          from pathlib import Path
+          text = Path(os.environ["RUNNER_TEMP"], "bundle-signature.log").read_text()[-3000:]
+          print("::error title=macOS code signature::" + text.replace("%", "%25").replace("\n", "%0A").replace("\r", "%0D"))
+          PY
+            exit 1
+          fi
           EXE=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$APP/Contents/Info.plist")
           for binary in "$EXE" xray wireproxy ins-helper sing-box; do
             test -x "$APP/Contents/MacOS/$binary"
