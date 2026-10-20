@@ -1,0 +1,60 @@
+name: Inspect published macOS candidate
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/macos-bundle-audit.yml'
+  workflow_dispatch:
+    inputs:
+      version:
+        required: true
+        default: '1.0.169'
+      sha256:
+        required: true
+        default: 'e227864087f2ffc3bdbda43878d5c78b8d114424491d8c357198570cc881de61'
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Inspect package without executing it
+        env:
+          CANDIDATE_VERSION: ${{ inputs.version || '1.0.169' }}
+          CANDIDATE_SHA256: ${{ inputs.sha256 || 'e227864087f2ffc3bdbda43878d5c78b8d114424491d8c357198570cc881de61' }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, pathlib, plistlib, re, subprocess, tarfile, urllib.request
+          version, expected = os.environ["CANDIDATE_VERSION"], os.environ["CANDIDATE_SHA256"]
+          assert re.fullmatch(r"\d+\.\d+\.\d+", version)
+          assert re.fullmatch(r"[a-f0-9]{64}", expected)
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "candidate-audit"
+          root.mkdir()
+          archive = root / "app.tar.gz"
+          url = f"https://vpn.insellers.su/app/desktop/v/{version}/INSELLERS-VPN-mac.app.tar.gz"
+          with urllib.request.urlopen(url, timeout=60) as response, archive.open("wb") as output:
+              while block := response.read(1024 * 1024):
+                  output.write(block)
+          assert hashlib.file_digest(archive.open("rb"), "sha256").hexdigest() == expected
+          with tarfile.open(archive) as package:
+              package.extractall(root, filter="data")
+          apps = list(root.glob("*.app"))
+          assert len(apps) == 1
+          app = apps[0]
+          info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+          def inspect(label, command):
+              result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+              message = f"{label}: exit={result.returncode}; {(result.stdout + result.stderr)[-2500:]}"
+              safe = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print("::notice title=macOS package evidence::" + safe)
+              return result.returncode == 0
+          ok = inspect("bundle signature", ["codesign", "--verify", "--deep", "--strict", str(app)])
+          for name in [info["CFBundleExecutable"], "xray", "wireproxy", "ins-helper", "sing-box"]:
+              binary = app / "Contents/MacOS" / name
+              ok = inspect(name + " architectures", ["lipo", str(binary), "-verify_arch", "arm64", "x86_64"]) and ok
+          print("::notice title=macOS package evidence::CodeResources present: " + str((app / "Contents/_CodeSignature/CodeResources").exists()))
+          raise SystemExit(0 if ok else 1)
+          PY
