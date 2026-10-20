@@ -147,6 +147,9 @@ fn mark(app: &AppHandle, kind: u8) {
 /// Один запуск подключения за раз: повторное нажатие / трей / автоподключение не плодят второй Xray.
 /// До какого времени (мс) ручной протокол заменён «Автовыбором» (ручной путь не пропускал трафик). 0 - не заменён.
 static STARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// OS proxy calls can block while stop() runs on another runtime thread. Keep
+// activation and teardown serialized; cancellation itself remains immediate.
+static CONNECTION_TRANSITION: Mutex<()> = Mutex::new(());
 struct StartGuard;
 impl Drop for StartGuard { fn drop(&mut self) { STARTING.store(false, std::sync::atomic::Ordering::SeqCst); } }
 
@@ -1187,6 +1190,9 @@ pub fn stop(app: &AppHandle) {
     crate::telemetry::disconnect();   // 01.10: vpn.disconnect (сколько был подключён, байты, причина)
     set_wanted(app, false);   // любая остановка из приложения — не переподключаемся
     bump_gen(app);            // незаконченный запуск, сторож и гостевой таймер старого подключения больше не действуют
+    let _transition = CONNECTION_TRANSITION.lock().unwrap();
+    // A finalization already holding the lock may have crossed its last check.
+    set_wanted(app, false);
     crate::tun::down();       // TUN (26.09): весь трафик системы снова идёт как без VPN
     set_proxy(false);
     if let Some(st) = app.try_state::<VpnState>() {
@@ -1408,6 +1414,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
                 if ok { tun_on = true; crate::remote_log("vpn.tun_on", json!({"dns": dns, "how": "routed_https32k", "bytes": probe_bytes, "ms": probe_ms})); }
                 else {
                     let st = tauri::async_runtime::spawn_blocking(crate::tun::status).await.unwrap_or_default();
+                    if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
                     crate::tun::down();
                     crate::remote_log("vpn.tun_fallback", json!({"reason": "нет трафика через TUN", "err": why, "helper": st}));
                 }
@@ -1415,18 +1422,32 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
             Err(e) => crate::remote_log("vpn.tun_fallback", json!({"reason": e})),
         }
     }
+    let transition = CONNECTION_TRANSITION.lock().unwrap();
+    if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
     if !tun_on {
         set_proxy(true);
-        if !proxy_is_ours() { std::thread::sleep(Duration::from_millis(300)); set_proxy(true); }
+        if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
+        if !proxy_is_ours() {
+            std::thread::sleep(Duration::from_millis(300));
+            if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
+            set_proxy(true);
+        }
+        if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
         if !proxy_is_ours() {
             crate::remote_log("vpn.proxy_not_applied", json!({}));
             if !proxy_left_on() { kill_child(&app); return Err("Не удалось включить VPN для этой сети. Переподключите Wi-Fi или перезапустите приложение".into()); }
         }
     }
+    if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
     set_wanted(&app, true);
+    if cur_gen(&app) != my_gen { set_wanted(&app, false); return Err("CANCELLED".into()); }
     UP_AT.store(crate::now_ms(), std::sync::atomic::Ordering::SeqCst);
     arm_guest_timer(&app, until);
-    let watch_gen = cur_gen(&app);
+    // The timer advances exactly once. Do not adopt a concurrent stop's newer
+    // generation as if it belonged to this successful startup.
+    let watch_gen = my_gen.wrapping_add(1);
+    if cur_gen(&app) != watch_gen { set_wanted(&app, false); return Err("CANCELLED".into()); }
+    drop(transition);
 
     // 5) Monitor our own tunnel; yield to another connection without stopping it.
     let w = app.clone();
@@ -1734,5 +1755,6 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
             tauri::async_runtime::spawn_blocking(move || std::thread::sleep(Duration::from_secs(secs))).await.ok();
         }
     });
+    if cur_gen(&app) != watch_gen || !wanted(&app) { return Err("CANCELLED".into()); }
     Ok(())
 }

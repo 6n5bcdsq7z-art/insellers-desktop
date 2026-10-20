@@ -15,4 +15,23 @@ fn main() {
      +&section("fn manual_choice(","/// Описание пути");
  fs::write(out.join("selection.rs"),format!("use serde_json::{{Value,json}};\n{}",selection)).unwrap();
 
+ println!("cargo:rerun-if-env-changed=INSELLERS_VPN_CANCEL_SOURCE");
+ let cancellation_src=env::var("INSELLERS_VPN_CANCEL_SOURCE").ok().map(|p|fs::read_to_string(p).unwrap()).unwrap_or(v);
+ let section=|start:&str,end:&str| {let a=cancellation_src.find(start).unwrap();let b=a+cancellation_src[a..].find(end).unwrap();cancellation_src[a..b].to_owned()};
+ let stop=section("pub fn stop(","/// Kept for the bridge");
+ let status=section("                    let st = tauri::async_runtime::spawn_blocking(crate::tun::status)","\n                }");
+ let finish_start=if cancellation_src.contains("    let transition = CONNECTION_TRANSITION.lock()") {"    let transition = CONNECTION_TRANSITION.lock()"}else{"    if !tun_on {"};
+ let finish=section(finish_start,"\n    // 5) Monitor our own tunnel");
+ let final_a=cancellation_src.rfind("\n    });\n").unwrap()+"\n    });\n".len();
+ let final_b=cancellation_src.rfind("\n}").unwrap();
+ let final_return=&cancellation_src[final_a..final_b];
+ let actual=format!("{stop}\nasync fn finish_start(app:AppHandle,my_gen:u32,await_status:bool,tun_on:bool)->Result<(),String>{{let why=String::from(\"fixture failure\");let until=0;\nif await_status {{\n{status}\n}}\n{finish}\ntest_platform::after_transition();\n{final_return}\n}}");
+ let actual=actual.replace("tauri::async_runtime::spawn_blocking", "tokio::task::spawn_blocking")
+     .replace("crate::tun::", "test_platform::tun::")
+     .replace("crate::telemetry::", "test_platform::telemetry::")
+     .replace("crate::remote_log", "test_platform::remote_log")
+     .replace("crate::now_ms", "test_platform::now_ms")
+     .replace("std::thread::sleep", "test_platform::sleep");
+ fs::write(out.join("cancellation.rs"),actual).unwrap();
+
 }

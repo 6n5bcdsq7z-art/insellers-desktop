@@ -3,6 +3,7 @@ mod private_file;
 #[path = "../../src-tauri/src/traffic_probe.rs"]
 mod traffic_probe;
 mod manual_selection;
+mod cancellation;
 include!(concat!(env!("OUT_DIR"), "/helper.rs"));
 include!(concat!(env!("OUT_DIR"), "/variants.rs"));
 use tokio::io::{AsyncReadExt,AsyncWriteExt};
@@ -21,6 +22,7 @@ async fn sequence(responses:Vec<(u16,usize)>)->u16 {
 #[tokio::main]
 async fn main(){
  manual_selection::run();
+ cancellation::run();
  for (status,size,expected) in [(500,65536,false),(403,65536,false),(200,64,false),(204,0,false),(302,65536,false),(200,32768,true)] {
   let port=mock(status,size,false).await;
   let (ok,_,_,_)=traffic_probe::check_urls(port,32768,Duration::from_secs(2),&["http://fixture.invalid/32k"]).await;
