@@ -120,7 +120,7 @@ fn kill_own_xray(keep_pid: Option<u32>) {
         if Some(pid.as_u32()) == keep_pid { continue; }
         let name = p.name().to_string_lossy().to_lowercase();
         // и wireproxy (AmneziaWG): «потерянный» после падения держал бы наши порты 38808/38809
-        if !name.contains("xray") && !name.contains("wireproxy") { continue; }
+        if !name.contains("xray") && !name.contains("wireproxy") && !matches!(name.as_str(), "naive" | "tuic" | "mieru") { continue; }
         if let Some(exe) = p.exe() { if exe.starts_with(&own_dir) { let _ = p.kill(); } }
     }
 }
@@ -513,7 +513,7 @@ static HOT_CUR: Mutex<String> = Mutex::new(String::new());
 static HOT_BAD: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
 fn set_cur_desc(d: &str) { *CUR_DESC.lock().unwrap() = d.to_string(); }
 pub(crate) fn cur_desc() -> String { CUR_DESC.lock().unwrap().clone() }
-fn manual_choice(choice: &str) -> bool { choice == "amneziawg" || choice == "reality" || choice == "xhttp" || choice == "hysteria2" || choice.starts_with("cfg:") }
+fn manual_choice(choice: &str) -> bool { matches!(choice, "naive" | "tuic" | "mieru") || choice == "amneziawg" || choice == "reality" || choice == "xhttp" || choice == "hysteria2" || choice.starts_with("cfg:") }
 
 /// Описание пути для центра диагностики: вид@адрес (xhttp@212.34.151.212); у балансировщика - "auto".
 fn path_desc(c: &Value) -> String {
@@ -888,10 +888,14 @@ async fn xray_candidates(app: &AppHandle, client: &reqwest::Client, url: &str, o
 /// Запуск ядра (xray или wireproxy) + наблюдение за процессом: упал сам - переподключаемся или сообщаем.
 fn launch(app: &AppHandle, bin: &str, run_args: Vec<String>, dir: &PathBuf) -> Result<(), String> {
     notify(app, "connecting", "Запускаем VPN-ядро…");
-    let (mut rx, child) = app.shell().sidecar(bin).map_err(|e| e.to_string())?
-        .env("XRAY_LOCATION_ASSET", dir.to_string_lossy().to_string())
-        .args(run_args)
-        .spawn().map_err(|e| format!("Не удалось запустить ядро: {e}"))?;
+    let mut command = app.shell().sidecar(bin).map_err(|e| e.to_string())?
+        .env("XRAY_LOCATION_ASSET", dir.to_string_lossy().to_string());
+    let run_args = match bin {
+        "mieru" => { command=command.env("MIERU_CONFIG_JSON_FILE", run_args.first().ok_or("Нет конфигурации")?); vec!["run".into()] },
+        "tuic" => vec!["run".into(), "-c".into(), run_args.first().ok_or("Нет конфигурации")?.clone()],
+        _ => run_args,
+    };
+    let (mut rx, child) = command.args(run_args).spawn().map_err(|_| "Не удалось запустить выбранный движок".to_string())?;
     let my_pid = child.pid();
     app.state::<VpnState>().child.lock().unwrap().replace(child);
     let a = app.clone();
@@ -1028,8 +1032,12 @@ async fn fetch_ad_hosts(client: &reqwest::Client, dir: &PathBuf) {
 
 /// Запустить маршрутизатор (свой слот, не трогает основной процесс wireproxy).
 fn launch_router(app: &AppHandle, dir: &PathBuf) -> Result<(), String> {
+    launch_router_value(app, dir, &router_config(dir))
+}
+
+fn launch_router_value(app: &AppHandle, dir: &PathBuf, config: &Value) -> Result<(), String> {
     let p = dir.join("router.json");
-    std::fs::write(&p, serde_json::to_vec(&router_config(dir)).unwrap()).map_err(|e| e.to_string())?;
+    if !crate::private_file::write_private(&p, &config.to_string()) { return Err("Не удалось сохранить маршруты".into()); }
     let (mut rx, child) = app.shell().sidecar("xray").map_err(|e| e.to_string())?
         .env("XRAY_LOCATION_ASSET", dir.to_string_lossy().to_string())
         .args(["run", "-c", &p.to_string_lossy()])
@@ -1195,10 +1203,8 @@ pub fn stop(app: &AppHandle) {
     set_wanted(app, false);
     crate::tun::down();       // TUN (26.09): весь трафик системы снова идёт как без VPN
     set_proxy(false);
-    if let Some(st) = app.try_state::<VpnState>() {
-        let child = st.child.lock().unwrap().take();
-        if let Some(child) = child { let _ = child.kill(); }
-    }
+    if app.try_state::<VpnState>().is_some() { kill_child(app); }
+    if let Ok(dir) = data_dir(app) { let _ = std::fs::remove_file(dir.join("naive.json")); }
     kill_own_xray(None);      // и «потерянные» Xray, если были
 }
 
@@ -1289,7 +1295,23 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     } else { None };
     // Obtain usable configuration before disconnecting another working VPN.
     // A failed bootstrap must leave that connectivity path available.
-    let prepared_candidates = if awg_path.is_none() {
+    let naive_profile = if matches!(choice.as_str(), "naive" | "tuic" | "mieru") {
+        if !crate::naive::available_protocol(&choice) { return Err(bootstrap_error("Движок выбранного протокола не установлен или не поддерживает эту ОС".into())); }
+        let cached = cached_profile(&last, &token, &url, &choice);
+        let profile = if cached_bootstrap {
+            cached.ok_or_else(|| bootstrap_error("Нет сохранённого профиля".into()))?
+        } else {
+            match subscription_text(&client, &crate::naive::subscription_url_for(&url, &choice)?).await {
+                Ok((raw, _)) => serde_json::from_str::<Value>(&raw).map_err(|_| bootstrap_error("Неверный профиль".into()))?,
+                Err(e) if e == "SUB_UNAVAILABLE" => cached.ok_or_else(|| bootstrap_error("Профиль временно недоступен".into()))?,
+                Err(e) => return Err(bootstrap_error(e)),
+            }
+        };
+        crate::naive::engine(&profile, crate::naive::INNER, crate::now_ms()).map_err(bootstrap_error)?;
+        Some(profile)
+    } else { None };
+    let is_naive = naive_profile.is_some();
+    let prepared_candidates = if awg_path.is_none() && !is_naive {
         Some(xray_candidates(&app, &client, &url, cached_bootstrap, &choice, &dir, &last, &token).await
             .map_err(bootstrap_error)?)
     } else { None };
@@ -1313,6 +1335,23 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     // Путь не пропускает трафик - сами пробуем следующий (порядок путей от сервера = выбор центра диагностики для
     // провайдера), системный прокси ставим только на проверенный путь. Не прошёл ни один - честная ошибка.
     let mut is_awg = false;
+    if let Some(ref profile) = naive_profile {
+        notify(&app, "connecting", "Запускаем выбранный протокол…");
+        let path = dir.join("naive.json");
+        let engine = crate::naive::engine(profile, crate::naive::INNER, crate::now_ms())?;
+        let router = crate::naive::router(profile, crate::now_ms())?;
+        if !crate::private_file::write_private(&path, &engine.to_string()) { return Err("Не удалось сохранить настройки".into()); }
+        let launched = launch(&app, &choice, vec![path.to_string_lossy().to_string()], &dir)
+            .and_then(|_| launch_router_value(&app, &dir, &router));
+        if let Err(e) = launched { kill_child(&app); let _ = std::fs::remove_file(&path); return Err(e); }
+        if cur_gen(&app) != my_gen { kill_child(&app); let _ = std::fs::remove_file(&path); return Err("CANCELLED".into()); }
+        let passed = link_ok_within(15).await;
+        let _ = std::fs::remove_file(&path);
+        if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
+        if !passed { kill_child(&app); return Err("Выбранный протокол не передаёт данные".into()); }
+        set_cur_path(&choice); set_cur_desc(&choice);
+        let _ = save_profile(&last, profile.to_string().as_bytes(), &token, &url, &choice);
+    }
     if let Some(path) = awg_path {
         notify(&app, "connecting", "Подключаемся через AmneziaWG…");
         let inner = dir.join("awg-inner.conf");
@@ -1340,7 +1379,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         }
         if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
     }
-    if !is_awg {
+    if !is_awg && !is_naive {
         let cands = match prepared_candidates {
             Some(cands) => cands,
             // AWG already had a complete configuration before teardown. Only
@@ -1385,7 +1424,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     // Помощника нет - ставим (один раз, пароль администратора / UAC); отказ или сбой - системный прокси, как раньше.
     let mut tun_on = false;
     if crate::tun::supported() && !crate::pref("tun_off") {
-        let cfg_text = if is_awg { std::fs::read_to_string(dir.join("awg.conf")).unwrap_or_default() }
+        let cfg_text = if let Some(ref profile) = naive_profile { json!({"outbounds":[{"settings":{"address":profile["server"]}}]}).to_string() } else if is_awg { std::fs::read_to_string(dir.join("awg.conf")).unwrap_or_default() }
                        else { std::fs::read_to_string(dir.join("config.json")).unwrap_or_default() };
         let bypass = crate::tun::bypass_ips(&cfg_text);
         let dns = if is_awg { "tcp" } else { "udp" };
@@ -1546,7 +1585,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     let (h_url, h_dir, h_last) = (url.clone(), dir.clone(), last.clone());
     // 29.09: подключились по сохранённой конфигурации - как только путь рабочий, забираем подписку ЧЕРЕЗ туннель и переподключаемся
     // один раз на свежие настройки (раньше Мак мог днями ехать на старых)
-    let mut h_refresh = cached_bootstrap && !token.is_empty();
+    let mut h_refresh = cached_bootstrap && !token.is_empty() && !is_naive;
     let h_token = token.clone();
     tauri::async_runtime::spawn(async move {
         let client = match reqwest::Proxy::all(format!("http://127.0.0.1:{HTTP_PORT}"))

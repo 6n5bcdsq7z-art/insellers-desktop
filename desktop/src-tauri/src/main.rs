@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod vpn;
+mod naive;
 mod connection_guard;
 mod traffic_probe;
 mod check;
@@ -474,6 +475,9 @@ fn init_script(token: &str, version: &str, bridge_nonce: &str) -> String {
     let tok = serde_json::to_string(token).unwrap_or_else(|_| "\"\"".into());
     let ver = serde_json::to_string(version).unwrap_or_else(|_| "\"\"".into());
     let prefs_js = prefs().to_string();
+    let has_naive = naive::available();
+    let has_tuic = naive::available_protocol("tuic");
+    let has_mieru = naive::available_protocol("mieru");
     let hw = serde_json::to_string(&format!("ins-{}", install_id())).unwrap_or_default();
     let model = serde_json::to_string(&host_model()).unwrap_or_default();
     let guest = guest_until();
@@ -512,6 +516,9 @@ fn init_script(token: &str, version: &str, bridge_nonce: &str) -> String {
     setLang: function (l) {{ inv("set_lang", {{ lang: String(l) }}); }},
     hasVpn: function () {{ return true; }},
     hasAwg: function () {{ return true; }},
+    hasNaive: function () {{ return {has_naive}; }},
+    hasTuic: function () {{ return {has_tuic}; }},
+    hasMieru: function () {{ return {has_mieru}; }},
     connectGuest: function (u, t) {{ inv("vpn_guest", {{ url: String(u), until: String(t) }}); }},
     getGuestUntil: function () {{ var g = +window.__INS_GUEST_UNTIL || 0; return String(g > Date.now() ? g : 0); }},
     getVpnState: function () {{ return window.__INS_VPN || "disconnected"; }},
