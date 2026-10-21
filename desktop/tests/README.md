@@ -35,6 +35,15 @@ require one successful subscription fetch before offline reuse. The separate
 `compile` CI job checks the complete Desktop Rust application with compile-only
 sidecar/icon/frontend placeholders; it neither runs nor publishes a client.
 
+It also compiles the actual `stop()` and final startup activation blocks with
+controllable OS-operation barriers. A second thread cancels during helper
+status, proxy activation/check/retry, wanted-state publication, the guest
+timer's generation change and the final return; the final
+state must keep proxy, TUN, core and reconnect intent off. Three uncancelled
+controls preserve TUN/proxy/fallback success. This checks concurrent source
+behavior without altering the machine's proxy or TUN. To reproduce an older
+source failure, set `INSELLERS_VPN_CANCEL_SOURCE` to its local `vpn.rs` snapshot.
+
 With Playwright and Chromium installed, use the actual Rust-generated bridge
 fixture above for browser-frame checks:
 

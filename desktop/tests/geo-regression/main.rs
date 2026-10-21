@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use std::{path::PathBuf,time::Duration};
 use serde_json::{Value,json};
+#[path="../../src-tauri/src/traffic_probe.rs"] mod traffic_probe;
 include!(concat!(env!("OUT_DIR"),"/choice.rs"));
 extern crate self as tauri;
 pub mod async_runtime {pub use tokio::{spawn,task::spawn_blocking};}

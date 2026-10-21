@@ -1,0 +1,15 @@
+[package]
+name = "insellers-naive-regression"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+url = "2"
+serde_json = "1"
+
+[lib]
+path = "../../src-tauri/src/naive.rs"
+
+[[bin]]
+name = "emit-protocol-profile"
+path = "emit.rs"
