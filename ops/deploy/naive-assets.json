@@ -1,0 +1,56 @@
+{
+  "version": "v154.0.8037.49-4",
+  "assets": [
+    {
+      "name": "naiveproxy-plugin-v154.0.8037.49-4-arm64-v8a.apk",
+      "sha256": "53d2ffd05fa13a8af22225bd738e5f59c7a499b369917c633a30c19c84f1f117",
+      "url": "https://github.com/klzgrad/naiveproxy/releases/download/v154.0.8037.49-4/naiveproxy-plugin-v154.0.8037.49-4-arm64-v8a.apk",
+      "bytes": 3762787,
+      "platform": "android-arm64",
+      "member": "lib/arm64-v8a/libnaive.so",
+      "machine": 183,
+      "binary_sha256": "31ff5d94fd2160fe2cf9ec5b80437ae05e8b77988e3b32ed594ade06a344f725"
+    },
+    {
+      "name": "naiveproxy-plugin-v154.0.8037.49-4-armeabi-v7a.apk",
+      "sha256": "175e0edcccf65c9e69ff9b2b3185b86474008d14c5ed7507bbb63a4bf3765797",
+      "url": "https://github.com/klzgrad/naiveproxy/releases/download/v154.0.8037.49-4/naiveproxy-plugin-v154.0.8037.49-4-armeabi-v7a.apk",
+      "bytes": 3514301,
+      "platform": "android-armv7",
+      "member": "lib/armeabi-v7a/libnaive.so",
+      "machine": 40,
+      "binary_sha256": "cabb3e3dbfc572605aff3c64fd9f2770812136b3bd6a67fa18968fbcd77fa54b"
+    },
+    {
+      "name": "naiveproxy-v154.0.8037.49-4-linux-x64.tar.xz",
+      "sha256": "9d765620b90f7c60eb40c7c68b2f82537757cc52a8693dee7a00f8ba8b13dfd0",
+      "url": "https://github.com/klzgrad/naiveproxy/releases/download/v154.0.8037.49-4/naiveproxy-v154.0.8037.49-4-linux-x64.tar.xz",
+      "bytes": 3718328,
+      "platform": "linux-x64",
+      "member": "naiveproxy-v154.0.8037.49-4-linux-x64/naive",
+      "machine": 62,
+      "binary_sha256": "9fba072aceb445d0401bb26273584726c479f5c4bc7f911aebf293c90136b044"
+    },
+    {
+      "name": "naiveproxy-v154.0.8037.49-4-mac-arm64-arm64.tar.xz",
+      "sha256": "aa91a9f1d743a85db65acdf2bd910c1bba9ca8831687fd947351880e2997b794",
+      "url": "https://github.com/klzgrad/naiveproxy/releases/download/v154.0.8037.49-4/naiveproxy-v154.0.8037.49-4-mac-arm64-arm64.tar.xz",
+      "bytes": 2789200,
+      "platform": "mac-arm64",
+      "member": "naiveproxy-v154.0.8037.49-4-mac-arm64-arm64/naive",
+      "machine": 16777228,
+      "binary_sha256": "c99f9f1e299e604acf6185f91721ad174f075380cf498de5b9315ba7a1eda43e"
+    },
+    {
+      "name": "naiveproxy-v154.0.8037.49-4-mac-x64-x64.tar.xz",
+      "sha256": "ae0fb930d982e6ec5d6a6012ec2b87bfc69d8953ad8b0a3517cb609eea9a6af4",
+      "url": "https://github.com/klzgrad/naiveproxy/releases/download/v154.0.8037.49-4/naiveproxy-v154.0.8037.49-4-mac-x64-x64.tar.xz",
+      "bytes": 3472548,
+      "platform": "mac-x64",
+      "member": "naiveproxy-v154.0.8037.49-4-mac-x64-x64/naive",
+      "machine": 16777223,
+      "binary_sha256": "43b289802e0d6f7aedea72e02bddd970ebbdb0dd83b163dcd9be9901e45544aa"
+    }
+  ],
+  "license_sha256": "845022e0c1db1abb41a6ba4cd3c4b674ec290f3359d9d3c78ae558d4c0ed9308"
+}
