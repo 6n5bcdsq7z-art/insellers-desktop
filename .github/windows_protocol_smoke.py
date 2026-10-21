@@ -123,4 +123,5 @@ if __name__=='__main__':
     try:
         result=run(a);a.output.write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result))
     except Exception as e:
-        print('Windows fixture failed: '+type(e).__name__);raise SystemExit(1)
+        detail = str(e) if isinstance(e, RuntimeError) else type(e).__name__
+        print('::error title=Windows protocol fixture::'+detail.replace('%','%25').replace('\n','%0A').replace('\r','%0D'));raise SystemExit(1)
