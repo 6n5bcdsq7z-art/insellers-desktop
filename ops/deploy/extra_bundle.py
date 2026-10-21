@@ -86,6 +86,9 @@ def desktop(base, archives, target, output, overlay=None):
             files=[]
             for platform in platforms:
                 file=Path(td)/(kind+platform);put(file,payload(asset(kind,platform),archives));files.append(file)
+                if len(platforms)==2:
+                    triple={'mac-arm64':'aarch64-apple-darwin','mac-x64':'x86_64-apple-darwin'}[platform]
+                    put(base/'binaries'/(kind+'-'+triple),file.read_bytes())
             binary=files[0]
             if len(files)==2:
                 binary=Path(td)/kind

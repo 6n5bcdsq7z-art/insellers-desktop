@@ -36,6 +36,11 @@ def main():
             receipts.append(naive_bundle.stage(platform, args.archives / asset['name'], root / platform, minimum_macos=(13, 0, 0)))
         binary = root / platforms[0] / 'naive'
         if len(platforms) == 2:
+            # Tauri checks each thin target before assembling its universal app.
+            for platform, triple in [('mac-arm64','aarch64-apple-darwin'),('mac-x64','x86_64-apple-darwin')]:
+                thin = base/'binaries'/('naive-'+triple)
+                thin.parent.mkdir(parents=True,exist_ok=True)
+                shutil.copy2(root/platform/'naive',thin);thin.chmod(0o755)
             binary = root / 'naive-universal'
             subprocess.run(['lipo', '-create', '-output', str(binary), *[str(root / name / 'naive') for name in platforms]], check=True)
             subprocess.run(['lipo', str(binary), '-verify_arch', 'arm64', 'x86_64'], check=True)
