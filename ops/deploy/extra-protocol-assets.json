@@ -1,0 +1,213 @@
+[
+  {
+    "protocol": "tuic",
+    "name": "sing-box-1.14.3-linux-amd64.tar.gz",
+    "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-linux-amd64.tar.gz",
+    "sha256": "e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee",
+    "bytes": 31678266,
+    "version": "v1.14.3",
+    "platform": "linux-x64",
+    "member": "sing-box-1.14.3-linux-amd64/sing-box",
+    "binary_sha256": "768d31fa7f68debc067bb4626539498a1e8751d36a7b99e1a54bee6a23815f93",
+    "machine": 62,
+    "inspection": {
+      "format": "ELF",
+      "type": 2,
+      "machine": 62,
+      "bits": 64
+    },
+    "role": "client"
+  },
+  {
+    "protocol": "tuic",
+    "name": "sing-box-1.14.3-android-arm.tar.gz",
+    "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-android-arm.tar.gz",
+    "sha256": "0c0df4fbf85656896d5b604e9eb4e556c1a3f68dd615b0ece3f9f6bd5adab5d6",
+    "bytes": 26110218,
+    "version": "v1.14.3",
+    "platform": "android-armv7",
+    "member": "sing-box-1.14.3-android-arm/sing-box",
+    "binary_sha256": "3748b66bd4e55ecfda8002fbbcc2051fa43bd20b44f0fb60e2102112a7ea4c01",
+    "machine": 40,
+    "inspection": {
+      "format": "ELF-PIE",
+      "machine": 40,
+      "bits": 32,
+      "interpreter": "/system/bin/linker",
+      "load_alignment": 4096
+    },
+    "role": "client"
+  },
+  {
+    "protocol": "tuic",
+    "name": "sing-box-1.14.3-darwin-arm64.tar.gz",
+    "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-darwin-arm64.tar.gz",
+    "sha256": "0360ce634a04c26a6b4fd957517987bb4f6c8950f63435ce3c5af2fcae5860c5",
+    "bytes": 29163190,
+    "version": "v1.14.3",
+    "platform": "mac-arm64",
+    "member": "sing-box-1.14.3-darwin-arm64/sing-box",
+    "binary_sha256": "28b7200074d6380006acc4f035a404c8af3dceb65dd92d7386ed92c9224e08a2",
+    "machine": 16777228,
+    "inspection": {
+      "format": "Mach-O",
+      "machine": 16777228,
+      "minimum_macos": [
+        26,
+        0,
+        0
+      ]
+    },
+    "role": "client"
+  },
+  {
+    "protocol": "tuic",
+    "name": "sing-box-1.14.3-darwin-amd64.tar.gz",
+    "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-darwin-amd64.tar.gz",
+    "sha256": "6d002b74d03b478547349cc10af89e007868596e5aa931816d45da9f544715a9",
+    "bytes": 31473185,
+    "version": "v1.14.3",
+    "platform": "mac-x64",
+    "member": "sing-box-1.14.3-darwin-amd64/sing-box",
+    "binary_sha256": "4d63d13fe7516a5d0a76c764095238f9d51ada7bfa5d18cf5030ca3032882c68",
+    "machine": 16777223,
+    "inspection": {
+      "format": "Mach-O",
+      "machine": 16777223,
+      "minimum_macos": [
+        26,
+        0,
+        0
+      ]
+    },
+    "role": "client"
+  },
+  {
+    "protocol": "mieru",
+    "name": "mieru_3.38.1_linux_amd64.tar.gz",
+    "url": "https://github.com/enfein/mieru/releases/download/v3.38.1/mieru_3.38.1_linux_amd64.tar.gz",
+    "sha256": "f7ec3b1c2caf338803426d2b3ff32d85654ce585b391556ebe5d2ea55d72d34f",
+    "bytes": 5353716,
+    "version": "v3.38.1",
+    "platform": "linux-x64",
+    "member": "mieru",
+    "binary_sha256": "3529fc7190e073d89da1ea9bbf08aa481edca59866c466725b8231325b0b6577",
+    "machine": 62,
+    "inspection": {
+      "format": "ELF",
+      "type": 2,
+      "machine": 62,
+      "bits": 64
+    },
+    "role": "client"
+  },
+  {
+    "protocol": "mieru",
+    "name": "mita_3.38.1_linux_amd64.tar.gz",
+    "url": "https://github.com/enfein/mieru/releases/download/v3.38.1/mita_3.38.1_linux_amd64.tar.gz",
+    "sha256": "015248cd8f9b3b2bc9da2e22f10996952a6ebe782918625a5f26741470a3cae8",
+    "bytes": 5045596,
+    "version": "v3.38.1",
+    "platform": "linux-x64",
+    "member": "mita",
+    "binary_sha256": "991179df309924d86251fa9b8109d67dc178d4161f0b83e4a5092940a79aa207",
+    "machine": 62,
+    "inspection": {
+      "format": "ELF",
+      "type": 2,
+      "machine": 62,
+      "bits": 64
+    },
+    "role": "server"
+  },
+  {
+    "protocol": "mieru",
+    "name": "mieru_3.38.1_android_arm64.tar.gz",
+    "url": "https://github.com/enfein/mieru/releases/download/v3.38.1/mieru_3.38.1_android_arm64.tar.gz",
+    "sha256": "2f0dc0a5348f3115640e8c8c76f1145f5789eaf23613998b1443d54c445d858a",
+    "bytes": 5106704,
+    "version": "v3.38.1",
+    "platform": "android-arm64",
+    "member": "mieru",
+    "binary_sha256": "01e29157037da514700af2c0f046fcbe7e6fa549d943da39af7684e227267520",
+    "machine": 183,
+    "inspection": {
+      "format": "ELF-PIE",
+      "machine": 183,
+      "bits": 64,
+      "interpreter": "/system/bin/linker64",
+      "load_alignment": 65536
+    },
+    "role": "client"
+  },
+  {
+    "protocol": "mieru",
+    "name": "mieru_3.38.1_macos_arm64.tar.gz",
+    "url": "https://github.com/enfein/mieru/releases/download/v3.38.1/mieru_3.38.1_macos_arm64.tar.gz",
+    "sha256": "148236bda659dbc372111eccc56712e17cd7db43694b7dbf4520d4fe5e27a310",
+    "bytes": 5038518,
+    "version": "v3.38.1",
+    "platform": "mac-arm64",
+    "member": "mieru",
+    "binary_sha256": "e020901726151e5c1eecb89b046a2cbf6df12f63cd963ad966870eb2f021369e",
+    "machine": 16777228,
+    "inspection": {
+      "format": "Mach-O",
+      "machine": 16777228,
+      "minimum_macos": [
+        12,
+        0,
+        0
+      ]
+    },
+    "role": "client"
+  },
+  {
+    "protocol": "mieru",
+    "name": "mieru_3.38.1_macos_amd64.tar.gz",
+    "url": "https://github.com/enfein/mieru/releases/download/v3.38.1/mieru_3.38.1_macos_amd64.tar.gz",
+    "sha256": "de8451bcf1be26b781c49bde8288b3a702f42d2eaffbe9a691c1f414c914ebe0",
+    "bytes": 5453902,
+    "version": "v3.38.1",
+    "platform": "mac-x64",
+    "member": "mieru",
+    "binary_sha256": "46ac229b64390fd723e19a6ddf70b4ed51fb60d7786271ecc238bb229ecec842",
+    "machine": 16777223,
+    "inspection": {
+      "format": "Mach-O",
+      "machine": 16777223,
+      "minimum_macos": [
+        12,
+        0,
+        0
+      ]
+    },
+    "role": "client"
+  },
+  {
+    "protocol": "tuic",
+    "name": "insellers-sing-box-1.14.3-android-arm64-16k.tar.gz",
+    "sha256": "5ccdc94f4657268f0feb341b4531e5cdfe085b0d89cd3bdcdef46d99268a15da",
+    "bytes": 13816932,
+    "version": "v1.14.3",
+    "platform": "android-arm64",
+    "member": "sing-box",
+    "binary_sha256": "ed887455bfc1b88748aac27ebbdf52fb3531397667be7b1ab814219ccd05e130",
+    "machine": 183,
+    "role": "client",
+    "inspection": {
+      "format": "ELF-PIE",
+      "machine": 183,
+      "bits": 64,
+      "interpreter": "/system/bin/linker64",
+      "load_alignment": 16384
+    },
+    "source_build": {
+      "repository": "https://github.com/SagerNet/sing-box.git",
+      "commit": "7054cac5124465ffdb145870d7c01885566711b1",
+      "go": "go1.26.8",
+      "ndk": "27.2.12479018",
+      "script": "android/tools/build_singbox.py"
+    }
+  }
+]

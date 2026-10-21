@@ -15,10 +15,14 @@ on:
         description: "What's new in English (notes_en; empty - the block is hidden for English)"
         required: false
         default: ""
+      protocol_engines:
+        description: "Include real Naive/TUIC/Mieru/AnyTLS engines in a candidate only"
+        type: boolean
+        default: false
       stage:
         description: "candidate - собрать и загрузить, людям НЕ публиковать (выпуск - workflow promote); all - сразу всем"
         required: false
-        default: "all"
+        default: "candidate"
   # расписание GitHub (cron) ни разу не сработало - ночную сборку запускает таймер Hetzner insellers-desktop-nightly (04:15 UTC)
 
 # новая сборка отменяет ещё идущую старую (публикация при этом строго по очереди)
@@ -138,13 +142,29 @@ jobs:
             lipo -create -output "$out/sing-box-universal-apple-darwin" "$out/sing-box-aarch64-apple-darwin" "$out/sing-box-x86_64-apple-darwin"
           fi
           chmod +x "$out"/ins-helper-* "$out"/sing-box-*; ls -la "$out"
+      - name: Stage pinned protocol engines in candidate
+        if: inputs.protocol_engines && runner.os != 'Windows'
+        env:
+          REQUESTED_STAGE: ${{ inputs.stage }}
+        run: |
+          set -euo pipefail
+          test "$REQUESTED_STAGE" = candidate
+          target=x86_64-unknown-linux-gnu
+          if [ "$RUNNER_OS" = macOS ]; then target=universal-apple-darwin; fi
+          python3 ../ops/deploy/protocol_desktop_stage.py --desktop . --target "$target" --cache "$RUNNER_TEMP/protocol-archives" --output "$RUNNER_TEMP/protocol-bundle"
+          echo "PROTOCOL_CONFIG=$RUNNER_TEMP/protocol-bundle/all/protocols.tauri.json" >> "$GITHUB_ENV"
       - name: Сборка (+ подпись обновлений)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -o pipefail
-          npx tauri build ${{ matrix.args }} 2>&1 | tee ../build-${{ matrix.os }}.log
+          # Candidate bundles still need a complete code seal. This is ad-hoc
+          # integrity signing, not Developer ID or Apple notarization.
+          if [ "$RUNNER_OS" = "macOS" ]; then export APPLE_SIGNING_IDENTITY="-"; fi
+          extra_args=()
+          if [ -n "${PROTOCOL_CONFIG:-}" ]; then extra_args=(--config "$PROTOCOL_CONFIG"); fi
+          npx tauri build ${{ matrix.args }} "${extra_args[@]}" 2>&1 | tee ../build-${{ matrix.os }}.log
       - name: Подпись распакованного .app.tar (дельта-обновления Mac, 27.09)
         # Приложение собирает новый .app.tar из своей базы и патча (~2 МБ вместо ~68 МБ) и проверяет ЭТУ подпись тем же
         # ключом Tauri. Не вышло - сборка не ломается: людям уйдёт только полный пакет, как раньше.
@@ -160,6 +180,47 @@ jobs:
           gunzip -c "$T" > "${T%.gz}"
           npx tauri signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "${T%.gz}" > /dev/null
           ls -la "${T%.gz}.sig"; rm -f "${T%.gz}"
+      - name: Verify macOS bundle and native architectures
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          APP=$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -type d | head -1)
+          test -n "$APP"
+          if ! codesign --verify --deep --strict "$APP" > "$RUNNER_TEMP/bundle-signature.log" 2>&1; then
+            python3 - <<'PY'
+          import os
+          from pathlib import Path
+          text = Path(os.environ["RUNNER_TEMP"], "bundle-signature.log").read_text()[-3000:]
+          print("::error title=macOS code signature::" + text.replace("%", "%25").replace("\n", "%0A").replace("\r", "%0D"))
+          PY
+            exit 1
+          fi
+          EXE=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$APP/Contents/Info.plist")
+          for binary in "$EXE" xray wireproxy ins-helper sing-box; do
+            test -x "$APP/Contents/MacOS/$binary"
+            lipo "$APP/Contents/MacOS/$binary" -verify_arch arm64 x86_64
+          done
+          if [ -n "${PROTOCOL_CONFIG:-}" ]; then
+            for binary in naive tuic mieru; do
+              test -x "$APP/Contents/MacOS/$binary"
+              lipo "$APP/Contents/MacOS/$binary" -verify_arch arm64 x86_64
+              codesign --verify --strict "$APP/Contents/MacOS/$binary"
+            done
+          fi
+          # This verifies bundle integrity, not Developer ID notarization.
+      - name: macOS process startup smoke on clean CI runner
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          APP=$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -type d | head -1)
+          EXE=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$APP/Contents/Info.plist")
+          "$APP/Contents/MacOS/$EXE" > "$RUNNER_TEMP/insellers-startup.log" 2>&1 &
+          APP_PID=$!
+          trap 'kill "$APP_PID" 2>/dev/null || true' EXIT
+          sleep 12
+          kill -0 "$APP_PID"
+          # No user profile, VPN credentials or privileged helper is installed.
+          # A live process is not a physical-device login or tunnel acceptance.
       - name: Лог ошибки → ветка ci-logs (чтобы разбирать без доступа к Actions UI)
         if: failure()
         env:
@@ -206,7 +267,7 @@ jobs:
           KEY: ${{ secrets.DESKTOP_UPLOAD_KEY }}
           NOTES: ${{ github.event.inputs.notes }}
           NOTES_EN: ${{ github.event.inputs.notes_en }}
-          STAGE: ${{ github.event.inputs.stage || 'all' }}
+          STAGE: ${{ github.event.inputs.stage || 'candidate' }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
