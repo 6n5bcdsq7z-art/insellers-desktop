@@ -38,7 +38,7 @@ def main():
         if len(platforms) == 2:
             binary = root / 'naive-universal'
             subprocess.run(['lipo', '-create', '-output', str(binary), *[str(root / name / 'naive') for name in platforms]], check=True)
-            subprocess.run(['lipo', '-verify_arch', 'arm64', 'x86_64', str(binary)], check=True)
+            subprocess.run(['lipo', str(binary), '-verify_arch', 'arm64', 'x86_64'], check=True)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(binary, dest)
         dest.chmod(0o755)

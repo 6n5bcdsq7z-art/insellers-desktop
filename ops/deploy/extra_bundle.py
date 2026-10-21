@@ -90,7 +90,7 @@ def desktop(base, archives, target, output, overlay=None):
             if len(files)==2:
                 binary=Path(td)/kind
                 subprocess.run(['lipo','-create','-output',str(binary),*[str(f) for f in files]],check=True)
-                subprocess.run(['lipo','-verify_arch','arm64','x86_64',str(binary)],check=True)
+                subprocess.run(['lipo',str(binary),'-verify_arch','arm64','x86_64'],check=True)
             put(base/'binaries'/(kind+'-'+target),binary.read_bytes())
             put(base/'resources'/(kind+'.LICENSE'),license_data(kind),0o644)
             bins.append('binaries/'+kind);resources.append('resources/'+kind+'.LICENSE')
