@@ -143,7 +143,7 @@ jobs:
           fi
           chmod +x "$out"/ins-helper-* "$out"/sing-box-*; ls -la "$out"
       - name: Stage pinned protocol engines in candidate
-        if: inputs.protocol_engines && runner.os != 'Windows'
+        if: inputs.protocol_engines
         env:
           REQUESTED_STAGE: ${{ inputs.stage }}
         run: |
@@ -151,6 +151,7 @@ jobs:
           test "$REQUESTED_STAGE" = candidate
           target=x86_64-unknown-linux-gnu
           if [ "$RUNNER_OS" = macOS ]; then target=universal-apple-darwin; fi
+          if [ "$RUNNER_OS" = Windows ]; then target=x86_64-pc-windows-msvc; fi
           python3 ../ops/deploy/protocol_desktop_stage.py --desktop . --target "$target" --cache "$RUNNER_TEMP/protocol-archives" --output "$RUNNER_TEMP/protocol-bundle"
           echo "PROTOCOL_CONFIG=$RUNNER_TEMP/protocol-bundle/all/protocols.tauri.json" >> "$GITHUB_ENV"
       - name: Сборка (+ подпись обновлений)

@@ -119,8 +119,9 @@ fn kill_own_xray(keep_pid: Option<u32>) {
     for (pid, p) in sys.processes() {
         if Some(pid.as_u32()) == keep_pid { continue; }
         let name = p.name().to_string_lossy().to_lowercase();
+        let name = name.strip_suffix(".exe").unwrap_or(&name);
         // и wireproxy (AmneziaWG): «потерянный» после падения держал бы наши порты 38808/38809
-        if !name.contains("xray") && !name.contains("wireproxy") && !matches!(name.as_str(), "naive" | "tuic" | "mieru" | "anytls") { continue; }
+        if !name.contains("xray") && !name.contains("wireproxy") && !matches!(name, "naive" | "tuic" | "mieru" | "anytls") { continue; }
         if let Some(exe) = p.exe() { if exe.starts_with(&own_dir) { let _ = p.kill(); } }
     }
 }

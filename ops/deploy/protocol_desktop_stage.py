@@ -9,6 +9,7 @@ import sys
 import urllib.request
 import extra_bundle
 import naive_bundle
+import windows_bundle
 
 
 def download(item,cache):
@@ -24,9 +25,13 @@ def download(item,cache):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--desktop',type=Path,required=True)
-    p.add_argument('--target',choices=('universal-apple-darwin','x86_64-unknown-linux-gnu'),required=True)
+    p.add_argument('--target',choices=('universal-apple-darwin','x86_64-unknown-linux-gnu','x86_64-pc-windows-msvc'),required=True)
     p.add_argument('--cache',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
     a=p.parse_args();a.cache.mkdir(parents=True,exist_ok=True)
+    if a.target == 'x86_64-pc-windows-msvc':
+        for item in json.loads(windows_bundle.MANIFEST.read_text()): download(item,a.cache)
+        print(windows_bundle.stage(a.desktop,a.cache,a.output/'all'))
+        return
     platforms=['mac-arm64','mac-x64'] if a.target.startswith('universal') else ['linux-x64']
     for item in json.loads(naive_bundle.MANIFEST.read_text())['assets']:
         if item['platform'] in platforms: download(item,a.cache)

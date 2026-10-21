@@ -5,18 +5,22 @@ pub const INNER: u16 = 38819;
 
 pub fn binary_name(kind: &str) -> &str { if kind == "anytls" { "tuic" } else { kind } }
 
+pub fn executable_name(kind: &str) -> String {
+    format!("{}{}", binary_name(kind), if cfg!(target_os = "windows") { ".exe" } else { "" })
+}
+
 pub fn available() -> bool { available_protocol("naive") }
 
 pub fn available_protocol(kind: &str) -> bool {
     if !matches!(kind, "naive" | "tuic" | "mieru" | "anytls") { return false; }
-    if cfg!(target_os = "windows") { return false; } // no pinned Windows engine yet
+    if cfg!(target_os = "windows") && !cfg!(target_arch = "x86_64") { return false; }
     if cfg!(target_os = "macos") {
         let major = std::process::Command::new("/usr/bin/sw_vers").arg("-productVersion").output().ok()
             .filter(|o| o.status.success()).and_then(|o| String::from_utf8(o.stdout).ok())
             .and_then(|v| v.trim().split('.').next()?.parse::<u32>().ok()).unwrap_or(0);
         if major < match kind { "tuic" | "anytls" => 26, "mieru" => 12, _ => 13 } { return false; }
     }
-    std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.join(binary_name(kind)))).map(|p| p.is_file()).unwrap_or(false)
+    std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.join(executable_name(kind)))).map(|p| p.is_file()).unwrap_or(false)
 }
 
 pub fn subscription_url(raw: &str) -> Result<String, String> { subscription_url_for(raw, "naive") }

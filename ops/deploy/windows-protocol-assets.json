@@ -1,0 +1,58 @@
+[
+  {
+    "protocol": "naive",
+    "platform": "windows-x64",
+    "name": "naiveproxy-v154.0.8037.49-4-win-x64.zip",
+    "url": "https://github.com/klzgrad/naiveproxy/releases/download/v154.0.8037.49-4/naiveproxy-v154.0.8037.49-4-win-x64.zip",
+    "bytes": 5273758,
+    "sha256": "120b99474848d2f737515c1043249b0998e235fda750f61893d774b317bf1870",
+    "member": "naiveproxy-v154.0.8037.49-4-win-x64/naive.exe",
+    "binary_sha256": "71b1bc593a1470f3fbaf216469edde58b06a97449558aa3bc70cb265591635b7",
+    "machine": 34404,
+    "dependencies": [
+      {
+        "member": "naiveproxy-v154.0.8037.49-4-win-x64/LICENSE",
+        "sha256": "2b5d44220cee7d541efdef3126ce838b2e73eaebae2f441af3573cb2c0af4d70",
+        "destination": "naive-upstream.LICENSE",
+        "kind": "license"
+      }
+    ]
+  },
+  {
+    "protocol": "tuic",
+    "platform": "windows-x64",
+    "name": "sing-box-1.14.3-windows-amd64.zip",
+    "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-windows-amd64.zip",
+    "bytes": 32853953,
+    "sha256": "d8b86ef58936dba9230ec6a57ffa4243933f3c14ef4809828b6c553440ed1518",
+    "member": "sing-box-1.14.3-windows-amd64/sing-box.exe",
+    "binary_sha256": "5c19bb3f8c12d4e85b3d47fe63123a7624b314b58dd7a8e32f51004f1c4d2faf",
+    "machine": 34404,
+    "dependencies": [
+      {
+        "member": "sing-box-1.14.3-windows-amd64/libcronet.dll",
+        "sha256": "3217c6260fbca5f16072e0b79735742f40109a63bb0ff88fd6b96dd6b54a2928",
+        "destination": "libcronet.dll",
+        "kind": "dll"
+      },
+      {
+        "member": "sing-box-1.14.3-windows-amd64/LICENSE",
+        "sha256": "bb3805862b583aee73ad6f7805ec634747a37257a637a3069857843f05ea589c",
+        "destination": "tuic-upstream.LICENSE",
+        "kind": "license"
+      }
+    ]
+  },
+  {
+    "protocol": "mieru",
+    "platform": "windows-x64",
+    "name": "mieru_3.38.1_windows_amd64.zip",
+    "url": "https://github.com/enfein/mieru/releases/download/v3.38.1/mieru_3.38.1_windows_amd64.zip",
+    "bytes": 5486818,
+    "sha256": "45d459257323f8e012b163217ca7810ee7cfe5b0eb7cb76e37bb05038a80badf",
+    "member": "mieru.exe",
+    "binary_sha256": "37add82895eb6b5d5289f82173d334a5aa697567e21937cc104e23db0c380c31",
+    "machine": 34404,
+    "dependencies": []
+  }
+]

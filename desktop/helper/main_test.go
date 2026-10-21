@@ -84,7 +84,7 @@ func TestCoreDNSDoesNotReenterResolver(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, process := range []string{"xray", "xray.exe", "wireproxy", "wireproxy.exe", "ins-helper", "ins-helper.exe"} {
+		for _, process := range []string{"xray", "xray.exe", "wireproxy", "wireproxy.exe", "naive", "naive.exe", "tuic", "tuic.exe", "mieru", "mieru.exe", "ins-helper", "ins-helper.exe"} {
 			if got := testRoute(t, raw, "yandex.ru", "77.88.8.8", process, "dns"); got != "direct" {
 				t.Errorf("%s resolver request loops through %s", process, got)
 			}
@@ -115,7 +115,7 @@ func TestSharedIngressPreservesSitesAndEndpointSafety(t *testing.T) {
 				if got := testRoute(t, raw, host, ip, "curl"); got != "core" {
 					t.Errorf("%s %s %s: got %s, want core", dns, host, ip, got)
 				}
-				for _, process := range []string{"xray", "xray.exe", "wireproxy", "wireproxy.exe", "ins-helper", "ins-helper.exe"} {
+				for _, process := range []string{"xray", "xray.exe", "wireproxy", "wireproxy.exe", "naive", "naive.exe", "tuic", "tuic.exe", "mieru", "mieru.exe", "ins-helper", "ins-helper.exe"} {
 					if got := testRoute(t, raw, host, ip, process); got != "direct" {
 						t.Errorf("core process %s loop risk: %s", process, got)
 					}
