@@ -20,7 +20,10 @@ pub fn available_protocol(kind: &str) -> bool {
             .and_then(|v| v.trim().split('.').next()?.parse::<u32>().ok()).unwrap_or(0);
         if major < match kind { "tuic" | "anytls" => 26, "mieru" => 12, _ => 13 } { return false; }
     }
-    std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.join(executable_name(kind)))).map(|p| p.is_file()).unwrap_or(false)
+    std::env::current_exe().ok().and_then(|p| p.parent().map(|dir| {
+        dir.join(executable_name(kind)).is_file()
+            && (!cfg!(target_os = "windows") || !matches!(kind, "tuic" | "anytls") || dir.join("libcronet.dll").is_file())
+    })).unwrap_or(false)
 }
 
 pub fn subscription_url(raw: &str) -> Result<String, String> { subscription_url_for(raw, "naive") }
