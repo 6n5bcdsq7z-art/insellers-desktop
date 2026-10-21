@@ -20,22 +20,6 @@
   },
   {
     "protocol": "tuic",
-    "name": "sing-box-1.14.3-android-arm64.tar.gz",
-    "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-android-arm64.tar.gz",
-    "sha256": "149569b5dbf01958e6598beb3a13078d6fc0e353ef06f4aff85f5f28bc23593b",
-    "bytes": 25589071,
-    "version": "v1.14.3",
-    "platform": "android-arm64",
-    "member": "sing-box-1.14.3-android-arm64/sing-box",
-    "binary_sha256": "64324301d1049474f6010b5a015d3143271a8df83bae83ae8814167ac8f74f5a",
-    "machine": 183,
-    "inspection": {
-      "inspection_error": "Android arm64 executable lacks 16 KiB LOAD alignment"
-    },
-    "role": "client"
-  },
-  {
-    "protocol": "tuic",
     "name": "sing-box-1.14.3-android-arm.tar.gz",
     "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-android-arm.tar.gz",
     "sha256": "0c0df4fbf85656896d5b604e9eb4e556c1a3f68dd615b0ece3f9f6bd5adab5d6",
@@ -199,5 +183,31 @@
       ]
     },
     "role": "client"
+  },
+  {
+    "protocol": "tuic",
+    "name": "insellers-sing-box-1.14.3-android-arm64-16k.tar.gz",
+    "sha256": "5ccdc94f4657268f0feb341b4531e5cdfe085b0d89cd3bdcdef46d99268a15da",
+    "bytes": 13816932,
+    "version": "v1.14.3",
+    "platform": "android-arm64",
+    "member": "sing-box",
+    "binary_sha256": "ed887455bfc1b88748aac27ebbdf52fb3531397667be7b1ab814219ccd05e130",
+    "machine": 183,
+    "role": "client",
+    "inspection": {
+      "format": "ELF-PIE",
+      "machine": 183,
+      "bits": 64,
+      "interpreter": "/system/bin/linker64",
+      "load_alignment": 16384
+    },
+    "source_build": {
+      "repository": "https://github.com/SagerNet/sing-box.git",
+      "commit": "7054cac5124465ffdb145870d7c01885566711b1",
+      "go": "go1.26.8",
+      "ndk": "27.2.12479018",
+      "script": "android/tools/build_singbox.py"
+    }
   }
 ]

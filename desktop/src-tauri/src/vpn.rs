@@ -120,7 +120,7 @@ fn kill_own_xray(keep_pid: Option<u32>) {
         if Some(pid.as_u32()) == keep_pid { continue; }
         let name = p.name().to_string_lossy().to_lowercase();
         // и wireproxy (AmneziaWG): «потерянный» после падения держал бы наши порты 38808/38809
-        if !name.contains("xray") && !name.contains("wireproxy") && !matches!(name.as_str(), "naive" | "tuic" | "mieru") { continue; }
+        if !name.contains("xray") && !name.contains("wireproxy") && !matches!(name.as_str(), "naive" | "tuic" | "mieru" | "anytls") { continue; }
         if let Some(exe) = p.exe() { if exe.starts_with(&own_dir) { let _ = p.kill(); } }
     }
 }
@@ -513,7 +513,7 @@ static HOT_CUR: Mutex<String> = Mutex::new(String::new());
 static HOT_BAD: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
 fn set_cur_desc(d: &str) { *CUR_DESC.lock().unwrap() = d.to_string(); }
 pub(crate) fn cur_desc() -> String { CUR_DESC.lock().unwrap().clone() }
-fn manual_choice(choice: &str) -> bool { matches!(choice, "naive" | "tuic" | "mieru") || choice == "amneziawg" || choice == "reality" || choice == "xhttp" || choice == "hysteria2" || choice.starts_with("cfg:") }
+fn manual_choice(choice: &str) -> bool { matches!(choice, "naive" | "tuic" | "mieru" | "anytls") || choice == "amneziawg" || choice == "reality" || choice == "xhttp" || choice == "hysteria2" || choice.starts_with("cfg:") }
 
 /// Описание пути для центра диагностики: вид@адрес (xhttp@212.34.151.212); у балансировщика - "auto".
 fn path_desc(c: &Value) -> String {
@@ -1295,7 +1295,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     } else { None };
     // Obtain usable configuration before disconnecting another working VPN.
     // A failed bootstrap must leave that connectivity path available.
-    let naive_profile = if matches!(choice.as_str(), "naive" | "tuic" | "mieru") {
+    let naive_profile = if matches!(choice.as_str(), "naive" | "tuic" | "mieru" | "anytls") {
         if !crate::naive::available_protocol(&choice) { return Err(bootstrap_error("Движок выбранного протокола не установлен или не поддерживает эту ОС".into())); }
         let cached = cached_profile(&last, &token, &url, &choice);
         let profile = if cached_bootstrap {
@@ -1341,7 +1341,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         let engine = crate::naive::engine(profile, crate::naive::INNER, crate::now_ms())?;
         let router = crate::naive::router(profile, crate::now_ms())?;
         if !crate::private_file::write_private(&path, &engine.to_string()) { return Err("Не удалось сохранить настройки".into()); }
-        let launched = launch(&app, &choice, vec![path.to_string_lossy().to_string()], &dir)
+        let launched = launch(&app, crate::naive::binary_name(&choice), vec![path.to_string_lossy().to_string()], &dir)
             .and_then(|_| launch_router_value(&app, &dir, &router));
         if let Err(e) = launched { kill_child(&app); let _ = std::fs::remove_file(&path); return Err(e); }
         if cur_gen(&app) != my_gen { kill_child(&app); let _ = std::fs::remove_file(&path); return Err("CANCELLED".into()); }

@@ -3,24 +3,26 @@ use serde_json::{json, Value};
 
 pub const INNER: u16 = 38819;
 
+pub fn binary_name(kind: &str) -> &str { if kind == "anytls" { "tuic" } else { kind } }
+
 pub fn available() -> bool { available_protocol("naive") }
 
 pub fn available_protocol(kind: &str) -> bool {
-    if !matches!(kind, "naive" | "tuic" | "mieru") { return false; }
+    if !matches!(kind, "naive" | "tuic" | "mieru" | "anytls") { return false; }
     if cfg!(target_os = "windows") { return false; } // no pinned Windows engine yet
     if cfg!(target_os = "macos") {
         let major = std::process::Command::new("/usr/bin/sw_vers").arg("-productVersion").output().ok()
             .filter(|o| o.status.success()).and_then(|o| String::from_utf8(o.stdout).ok())
             .and_then(|v| v.trim().split('.').next()?.parse::<u32>().ok()).unwrap_or(0);
-        if major < match kind { "tuic" => 26, "mieru" => 12, _ => 13 } { return false; }
+        if major < match kind { "tuic" | "anytls" => 26, "mieru" => 12, _ => 13 } { return false; }
     }
-    std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.join(kind))).map(|p| p.is_file()).unwrap_or(false)
+    std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.join(binary_name(kind)))).map(|p| p.is_file()).unwrap_or(false)
 }
 
 pub fn subscription_url(raw: &str) -> Result<String, String> { subscription_url_for(raw, "naive") }
 
 pub fn subscription_url_for(raw: &str, kind: &str) -> Result<String, String> {
-    if !matches!(kind, "naive" | "tuic" | "mieru") { return Err("Неверный протокол".into()); }
+    if !matches!(kind, "naive" | "tuic" | "mieru" | "anytls") { return Err("Неверный протокол".into()); }
     let mut u = url::Url::parse(raw).map_err(|_| "Неверная ссылка подписки")?;
     if u.scheme() != "https" || !u.username().is_empty() || u.password().is_some() || u.fragment().is_some() {
         return Err("Подписка требует HTTPS".into());
@@ -39,7 +41,7 @@ pub fn engine(profile: &Value, port: u16, now: u64) -> Result<Value, String> {
     let label = host.strip_suffix(".insellers.su").ok_or_else(invalid)?;
     let hex = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
     let user_ok = if profile["protocol"] == "mieru" { user.strip_prefix("m_").map(|s| s.len()==62 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))).unwrap_or(false) } else { user.strip_prefix("n_").map(hex).unwrap_or(false) };
-    if !matches!(profile["protocol"].as_str(), Some("naive" | "tuic" | "mieru")) || profile["expires_ms"].as_u64().unwrap_or(0) <= now || port < 1024
+    if !matches!(profile["protocol"].as_str(), Some("naive" | "tuic" | "mieru" | "anytls")) || profile["expires_ms"].as_u64().unwrap_or(0) <= now || port < 1024
         || label.is_empty() || !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
         || !user_ok || !hex(pass) { return Err(invalid()); }
     let dns = &profile["dns"];
@@ -57,6 +59,10 @@ pub fn engine(profile: &Value, port: u16, now: u64) -> Result<Value, String> {
                     "uuid":id,"password":pass,"congestion_control":"cubic","zero_rtt_handshake":false,
                     "udp_relay_mode":"native","tls":{"enabled":true,"server_name":host,"alpn":["h3"]}}]}))
         },
+        "anytls" => Ok(json!({"log":{"level":"error"},
+            "inbounds":[{"type":"socks","listen":"127.0.0.1","listen_port":port}],
+            "outbounds":[{"type":"anytls","tag":"proxy","server":host,"server_port":remote_port,
+                "password":pass,"client_metadata":"","tls":{"enabled":true,"server_name":host}}]})),
         "mieru" => Ok(json!({"profiles":[{"profileName":"INSELLERS","user":{"name":user,"password":pass},
             "servers":[{"domainName":host,"portBindings":[{"port":remote_port,"protocol":"TCP"}]}]}],
             "activeProfile":"INSELLERS","rpcPort":0,"socks5Port":port,"socks5ListenLAN":false,"loggingLevel":"ERROR"})),
@@ -86,7 +92,7 @@ pub fn router(profile: &Value, now: u64) -> Result<Value, String> {
             {"type":"field","ip":["::/0"],"outboundTag":"block"}
         ]}
     });
-    if profile["protocol"]!="naive" { config["routing"]["rules"].as_array_mut().unwrap().remove(1); }
+    if profile["protocol"]!="naive" && profile["protocol"]!="anytls" { config["routing"]["rules"].as_array_mut().unwrap().remove(1); }
     Ok(config)
 }
 
@@ -118,6 +124,15 @@ mod tests {
         assert_eq!(subscription_url("https://direct.insellers.su/sub/fixture?format=insapp&cf=1").unwrap(),
             "https://direct.insellers.su/sub/fixture?cf=1&format=insnaive");
         assert!(subscription_url("http://direct.insellers.su/sub/fixture").is_err());
+    }
+    #[test] fn anytls_preserves_tls_and_omits_client_metadata() {
+        let mut p=fixture();p["protocol"]=json!("anytls");
+        let c=engine(&p,INNER,1000).unwrap();
+        assert_eq!(c["outbounds"][0]["type"],"anytls");
+        assert_eq!(c["outbounds"][0]["client_metadata"],"");
+        assert!(c["outbounds"][0]["tls"].get("insecure").is_none());
+        assert_eq!(binary_name("anytls"),"tuic");
+        assert_eq!(router(&p,1000).unwrap()["routing"]["rules"][1]["outboundTag"],"block");
     }
     #[test] fn real_tuic_and_mieru_configs_have_protocol_specific_auth() {
         let mut p=fixture();p["protocol"]=json!("tuic");p["uuid"]=json!("00000000-0000-4000-8000-000000000001");

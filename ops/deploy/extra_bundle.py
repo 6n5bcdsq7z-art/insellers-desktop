@@ -13,8 +13,8 @@ import naive_bundle
 MANIFEST = Path(__file__).with_name('extra-protocol-assets.json')
 LICENSES = {'tuic': ('sing-box.LICENSE', '650d5e3b99a446fb38e820fa87a49562e0c79eab868fff58618ac487a58e554c'),
             'mieru': ('mieru.LICENSE', '3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986')}
-# TUIC arm64 fails 16 KiB alignment; Mieru has no official armv7 release.
-ANDROID = [('tuic','android-armv7','armeabi-v7a'), ('mieru','android-arm64','arm64-v8a')]
+# TUIC arm64 uses the pinned 16 KiB source build; Mieru has no official armv7 release.
+ANDROID = [('tuic','android-arm64','arm64-v8a'), ('tuic','android-armv7','armeabi-v7a'), ('mieru','android-arm64','arm64-v8a')]
 
 
 def asset(kind, platform, role='client'):

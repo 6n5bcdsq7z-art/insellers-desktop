@@ -16,7 +16,7 @@ on:
         required: false
         default: ""
       protocol_engines:
-        description: "Include real Naive/TUIC/Mieru engines in a candidate only"
+        description: "Include real Naive/TUIC/Mieru/AnyTLS engines in a candidate only"
         type: boolean
         default: false
       stage:

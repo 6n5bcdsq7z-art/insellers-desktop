@@ -28,6 +28,7 @@ struct VpnState { guest_gen: AtomicU32, wanted: AtomicBool, child: Mutex<Option<
 impl AppHandle { fn try_state<T>(&self) -> Option<&VpnState> { Some(&self.0) } }
 struct Child;
 impl Child { fn kill(self) -> Result<(), ()> { CORE.store(false, Ordering::SeqCst); Ok(()) } }
+fn data_dir(_: &AppHandle) -> Result<std::path::PathBuf, String> { Err("no filesystem in lifecycle fixture".into()) }
 fn cur_gen(app: &AppHandle) -> u32 { app.0.guest_gen.load(Ordering::SeqCst) }
 fn bump_gen(app: &AppHandle) -> u32 { app.0.guest_gen.fetch_add(1, Ordering::SeqCst) + 1 }
 fn set_wanted(app: &AppHandle, value: bool) {

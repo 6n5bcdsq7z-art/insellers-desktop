@@ -477,6 +477,7 @@ fn init_script(token: &str, version: &str, bridge_nonce: &str) -> String {
     let prefs_js = prefs().to_string();
     let has_naive = naive::available();
     let has_tuic = naive::available_protocol("tuic");
+    let has_anytls = naive::available_protocol("anytls");
     let has_mieru = naive::available_protocol("mieru");
     let hw = serde_json::to_string(&format!("ins-{}", install_id())).unwrap_or_default();
     let model = serde_json::to_string(&host_model()).unwrap_or_default();
@@ -518,6 +519,7 @@ fn init_script(token: &str, version: &str, bridge_nonce: &str) -> String {
     hasAwg: function () {{ return true; }},
     hasNaive: function () {{ return {has_naive}; }},
     hasTuic: function () {{ return {has_tuic}; }},
+    hasAnyTls: function () {{ return {has_anytls}; }},
     hasMieru: function () {{ return {has_mieru}; }},
     connectGuest: function (u, t) {{ inv("vpn_guest", {{ url: String(u), until: String(t) }}); }},
     getGuestUntil: function () {{ var g = +window.__INS_GUEST_UNTIL || 0; return String(g > Date.now() ? g : 0); }},
