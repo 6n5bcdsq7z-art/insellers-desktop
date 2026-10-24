@@ -62,7 +62,7 @@ def stage(desktop, cache, output):
     extra_bundle.put(base/path, extra_bundle.license_data('mieru'), 0o644); resources[path] = path
     path = 'resources/protocol-sources.txt'
     sources = ('Unmodified upstream engines; corresponding source and releases:\n'
-               'https://github.com/klzgrad/naiveproxy/tree/v154.0.8037.49-4\n'
+               'https://github.com/klzgrad/naiveproxy/tree/v154.0.8037.49-5\n'
                'https://github.com/SagerNet/sing-box/tree/v1.14.3\n'
                'https://github.com/enfein/mieru/tree/v3.38.1\n'
                'See the accompanying license files.\n')

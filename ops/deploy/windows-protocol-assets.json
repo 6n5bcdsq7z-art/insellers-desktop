@@ -2,16 +2,16 @@
   {
     "protocol": "naive",
     "platform": "windows-x64",
-    "name": "naiveproxy-v154.0.8037.49-4-win-x64.zip",
-    "url": "https://github.com/klzgrad/naiveproxy/releases/download/v154.0.8037.49-4/naiveproxy-v154.0.8037.49-4-win-x64.zip",
-    "bytes": 5273758,
-    "sha256": "120b99474848d2f737515c1043249b0998e235fda750f61893d774b317bf1870",
-    "member": "naiveproxy-v154.0.8037.49-4-win-x64/naive.exe",
-    "binary_sha256": "71b1bc593a1470f3fbaf216469edde58b06a97449558aa3bc70cb265591635b7",
+    "name": "naiveproxy-v154.0.8037.49-5-win-x64.zip",
+    "url": "https://github.com/klzgrad/naiveproxy/releases/download/v154.0.8037.49-5/naiveproxy-v154.0.8037.49-5-win-x64.zip",
+    "bytes": 5273913,
+    "sha256": "36d14c117ed052c8d04d10a30db083423ad4e423c012c2ef2ca7286ec06afbbc",
+    "member": "naiveproxy-v154.0.8037.49-5-win-x64/naive.exe",
+    "binary_sha256": "ecf6f56a834a3e945e703ddb766b32c8c474e9767d472bb0b45177c33300aa79",
     "machine": 34404,
     "dependencies": [
       {
-        "member": "naiveproxy-v154.0.8037.49-4-win-x64/LICENSE",
+        "member": "naiveproxy-v154.0.8037.49-5-win-x64/LICENSE",
         "sha256": "2b5d44220cee7d541efdef3126ce838b2e73eaebae2f441af3573cb2c0af4d70",
         "destination": "naive-upstream.LICENSE",
         "kind": "license"
