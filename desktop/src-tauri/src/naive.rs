@@ -84,7 +84,8 @@ pub fn router(profile: &Value, now: u64) -> Result<Value, String> {
         "log":{"loglevel":"warning"},
         "dns":{"queryStrategy":"UseIPv4","hosts":{host:profile["dns"]["ip"]},"servers":[profile["dns"]["url"]]},
         "inbounds":[
-            {"tag":"socks-in","listen":"127.0.0.1","port":38808,"protocol":"socks","settings":{"udp":true}},
+            {"tag":"socks-in","listen":"127.0.0.1","port":38808,"protocol":"socks","settings":{"udp":true},
+                "sniffing":{"enabled":true,"destOverride":["http","tls"],"routeOnly":false}},
             {"tag":"http-in","listen":"127.0.0.1","port":38809,"protocol":"http"},
             {"tag":"probe-in","listen":"127.0.0.1","port":38810,"protocol":"http"},
             {"tag":"page-in","listen":"127.0.0.1","port":38815,"protocol":"http"}
