@@ -44,16 +44,44 @@ fn data_path(name: &str) -> Option<std::path::PathBuf> {
     Some(base.join(name))
 }
 
-/// Токен: системное хранилище паролей, а если оно недоступно (неподписанное приложение на macOS) — файл 0600.
+// Keychain UI can wait indefinitely before the first window of an ad-hoc update.
+// Serialize our calls because the macOS interaction guard is process-wide.
+#[cfg(target_os = "macos")]
+static KEYCHAIN_ACCESS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn keychain_token() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    let _access = KEYCHAIN_ACCESS.lock().ok()?;
+    #[cfg(target_os = "macos")]
+    let _interaction = security_framework::os::macos::keychain::SecKeychain::disable_user_interaction().ok()?;
+    keyring_entry()?.get_password().ok()
+}
+
+fn keychain_save(t: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    let Ok(_access) = KEYCHAIN_ACCESS.lock() else { return false; };
+    #[cfg(target_os = "macos")]
+    let Ok(_interaction) = security_framework::os::macos::keychain::SecKeychain::disable_user_interaction() else { return false; };
+    if let Some(e) = keyring_entry() {
+        if t.is_empty() { let _ = e.delete_credential(); true } else { e.set_password(t).is_ok() }
+    } else { false }
+}
+
+/// Both stores are maintained on save. Prefer the existing private session file
+/// so app startup does not wait for a changed Keychain code-signing ACL.
 pub fn load_token() -> String {
-    let k = keyring_entry().and_then(|e| e.get_password().ok()).unwrap_or_default();
-    if !k.is_empty() { return k; }
-    data_path("session.token").and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default().trim().to_string()
+    let file = || data_path("session.token").and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default().trim().to_string();
+    #[cfg(target_os = "macos")]
+    {
+        let token = file();
+        if !token.is_empty() { return token; }
+    }
+    let keychain = keychain_token().unwrap_or_default();
+    if !keychain.is_empty() { return keychain; }
+    file()
 }
 fn save_token(t: &str) -> (bool, bool) {
-    let kr = if let Some(e) = keyring_entry() {
-        if t.is_empty() { let _ = e.delete_credential(); true } else { e.set_password(t).is_ok() }
-    } else { false };
+    let kr = keychain_save(t);
     let file = match data_path("session.token") {
         Some(p) => if t.is_empty() { let _ = std::fs::remove_file(&p); true } else { write_private(&p, t) },
         None => false,

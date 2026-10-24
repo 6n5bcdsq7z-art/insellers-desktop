@@ -18,7 +18,7 @@ on:
       protocol_engines:
         description: "Include real Naive/TUIC/Mieru/AnyTLS engines in a candidate only"
         type: boolean
-        default: false
+        default: true
       stage:
         description: "candidate - собрать и загрузить, людям НЕ публиковать (выпуск - workflow promote); all - сразу всем"
         required: false
@@ -82,8 +82,10 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
             python tests/engine-lifecycle-regression/run.py
+            python tests/session-startup-regression/run.py
           else
             python3 tests/engine-lifecycle-regression/run.py
+            python3 tests/session-startup-regression/run.py
           fi
       - uses: swatinem/rust-cache@v2
         with: { workspaces: "desktop/src-tauri -> target" }
