@@ -1424,7 +1424,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     // Помощника нет - ставим (один раз, пароль администратора / UAC); отказ или сбой - системный прокси, как раньше.
     let mut tun_on = false;
     if crate::tun::supported() && !crate::pref("tun_off") {
-        let cfg_text = if let Some(ref profile) = naive_profile { json!({"outbounds":[{"settings":{"address":profile["server"]}}]}).to_string() } else if is_awg { std::fs::read_to_string(dir.join("awg.conf")).unwrap_or_default() }
+        let cfg_text = if let Some(ref profile) = naive_profile { json!({"outbounds":[{"settings":{"address":crate::naive::endpoint(profile)?}}]}).to_string() } else if is_awg { std::fs::read_to_string(dir.join("awg.conf")).unwrap_or_default() }
                        else { std::fs::read_to_string(dir.join("config.json")).unwrap_or_default() };
         let bypass = crate::tun::bypass_ips(&cfg_text);
         let dns = if is_awg { "tcp" } else { "udp" };

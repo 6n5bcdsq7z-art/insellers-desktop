@@ -32,6 +32,21 @@ pub fn subscription_url_for(raw: &str, kind: &str) -> Result<String, String> {
     Ok(u.into())
 }
 
+/// Optional authoritative endpoint pin; retain the domain for certificate checks.
+pub fn endpoint(profile: &Value) -> Result<&str, String> {
+    let invalid = || "Неверный адрес VPN-сервера".to_string();
+    let host = profile["server"].as_str().ok_or_else(invalid)?;
+    let Some(pin) = profile.get("server_ipv4") else { return Ok(host); };
+    let value = pin.as_str().ok_or_else(invalid)?;
+    let ip = value.parse::<std::net::Ipv4Addr>().map_err(|_| invalid())?;
+    let [a,b,c,_] = ip.octets();
+    if ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_documentation()
+        || a == 0 || a >= 224 || (a == 100 && (64..=127).contains(&b))
+        || (a == 198 && matches!(b, 18 | 19)) || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 88 && c == 99) { return Err(invalid()); }
+    Ok(value)
+}
+
 pub fn engine(profile: &Value, port: u16, now: u64) -> Result<Value, String> {
     let invalid = || "Неверный или истёкший профиль Naive".to_string();
     let host = profile["server"].as_str().ok_or_else(invalid)?;
@@ -44,6 +59,7 @@ pub fn engine(profile: &Value, port: u16, now: u64) -> Result<Value, String> {
     if !matches!(profile["protocol"].as_str(), Some("naive" | "tuic" | "mieru" | "anytls")) || profile["expires_ms"].as_u64().unwrap_or(0) <= now || port < 1024
         || label.is_empty() || !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
         || !user_ok || !hex(pass) { return Err(invalid()); }
+    let address = endpoint(profile)?;
     let dns = &profile["dns"];
     let u = url::Url::parse(dns["url"].as_str().ok_or_else(invalid)?).map_err(|_| invalid())?;
     if u.scheme() != "https" || u.host_str() != dns["host"].as_str() || !u.username().is_empty()
@@ -55,18 +71,22 @@ pub fn engine(profile: &Value, port: u16, now: u64) -> Result<Value, String> {
             if id.len()!=36 || !id.bytes().enumerate().all(|(i,b)| if [8,13,18,23].contains(&i) { b==b'-' } else { b.is_ascii_hexdigit() }) { return Err(invalid()); }
             Ok(json!({"log":{"level":"error"},
                 "inbounds":[{"type":"socks","listen":"127.0.0.1","listen_port":port}],
-                "outbounds":[{"type":"tuic","tag":"proxy","server":host,"server_port":remote_port,
+                "outbounds":[{"type":"tuic","tag":"proxy","server":address,"server_port":remote_port,
                     "uuid":id,"password":pass,"congestion_control":"cubic","zero_rtt_handshake":false,
                     "udp_relay_mode":"native","tls":{"enabled":true,"server_name":host,"alpn":["h3"]}}]}))
         },
         "anytls" => Ok(json!({"log":{"level":"error"},
             "inbounds":[{"type":"socks","listen":"127.0.0.1","listen_port":port}],
-            "outbounds":[{"type":"anytls","tag":"proxy","server":host,"server_port":remote_port,
+            "outbounds":[{"type":"anytls","tag":"proxy","server":address,"server_port":remote_port,
                 "password":pass,"client_metadata":"","tls":{"enabled":true,"server_name":host}}]})),
         "mieru" => Ok(json!({"profiles":[{"profileName":"INSELLERS","user":{"name":user,"password":pass},
-            "servers":[{"domainName":host,"portBindings":[{"port":remote_port,"protocol":"TCP"}]}]}],
+            "servers":[{(if address == host { "domainName" } else { "ipAddress" }):address,"portBindings":[{"port":remote_port,"protocol":"TCP"}]}]}],
             "activeProfile":"INSELLERS","rpcPort":0,"socks5Port":port,"socks5ListenLAN":false,"loggingLevel":"ERROR"})),
-        _ => Ok(json!({"listen":format!("socks://127.0.0.1:{port}"),"proxy":format!("https://{user}:{pass}@{host}:{remote_port}")})),
+        _ => {
+            let mut config = json!({"listen":format!("socks://127.0.0.1:{port}"),"proxy":format!("https://{user}:{pass}@{host}:{remote_port}")});
+            if address != host { config["host-resolver-rules"] = json!(format!("MAP {host} {address}")); }
+            Ok(config)
+        },
     }
 }
 
@@ -112,6 +132,41 @@ mod tests {
         assert_eq!(r["routing"]["rules"][0]["network"],"tcp,udp");
         assert_eq!(r["routing"]["rules"][1]["outboundTag"],"block");
         assert!(!r.to_string().contains("freedom"));
+    }
+    #[test] fn endpoint_pin_preserves_tls_identity_for_all_engines() {
+        for kind in ["naive", "tuic", "mieru", "anytls"] {
+            let mut p=fixture(); p["protocol"]=json!(kind); p["server_ipv4"]=json!("176.124.198.72");
+            p["uuid"]=json!("00000000-0000-4000-8000-000000000001");
+            if kind=="mieru" { p["username"]=json!(format!("m_{}", "a".repeat(62))); }
+            let c=engine(&p,INNER,1000).unwrap();
+            match kind {
+                "naive" => {
+                    assert!(c["proxy"].as_str().unwrap().contains("@r1.insellers.su:"));
+                    assert_eq!(c["host-resolver-rules"],"MAP r1.insellers.su 176.124.198.72");
+                },
+                "mieru" => {
+                    assert_eq!(c["profiles"][0]["servers"][0]["ipAddress"], "176.124.198.72");
+                    assert!(c["profiles"][0]["servers"][0].get("domainName").is_none());
+                },
+                _ => {
+                    assert_eq!(c["outbounds"][0]["server"],"176.124.198.72");
+                    assert_eq!(c["outbounds"][0]["tls"]["server_name"],"r1.insellers.su");
+                    assert!(c["outbounds"][0]["tls"].get("insecure").is_none());
+                }
+            }
+            assert_eq!(endpoint(&p).unwrap(), "176.124.198.72");
+        }
+        assert_eq!(endpoint(&fixture()).unwrap(), "r1.insellers.su");
+        assert!(engine(&fixture(),INNER,1000).unwrap().get("host-resolver-rules").is_none());
+    }
+    #[test] fn synthetic_private_malformed_endpoint_pins_fail_closed() {
+        for pin in [json!("240.0.0.54"),json!("127.0.0.1"),json!("10.1.1.1"),json!("172.31.1.2"),
+            json!("192.168.1.1"),json!("169.254.1.1"),json!("100.64.0.1"),json!("198.18.0.1"),
+            json!("192.0.2.1"),json!("203.0.113.1"),json!("224.0.0.1"),json!("0.1.2.3"),
+            json!("176.124.198.072"),json!("176.124.198.72:443"),json!("other.insellers.su"),json!(null),json!(1)] {
+            let mut p=fixture();p["server_ipv4"]=pin;
+            assert!(engine(&p,INNER,1000).is_err(), "invalid pin was accepted");
+        }
     }
     #[test] fn expiry_and_untrusted_profile_fail_before_launch() {
         assert!(engine(&fixture(),INNER,2000).is_err());
