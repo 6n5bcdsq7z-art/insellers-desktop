@@ -1192,9 +1192,28 @@ fn set_proxy(enable: bool) {
     }
 }
 
+// Verified native UI state; a selected preference or a live process is not proof.
+static PUBLIC_STATUS: Mutex<(String, String, String, String)> = Mutex::new((String::new(), String::new(), String::new(), String::new()));
+fn status_message(state: &str, msg: &str, code: &str, path: &str) -> String {
+    format!("window.__INS_VPN={s};window.__INS_PATH_NOW={p};if({s}==='connected'&&!window.__INS_CONN_AT)window.__INS_CONN_AT=Date.now();if({s}==='disconnected')window.__INS_CONN_AT=0;window.dispatchEvent(new CustomEvent('ins:vpn',{{detail:{{state:{s},msg:{m},code:{c}}}}}))",
+        s=serde_json::to_string(state).unwrap(), p=serde_json::to_string(path).unwrap(),
+        m=serde_json::to_string(msg).unwrap(), c=serde_json::to_string(code).unwrap())
+}
+fn publish_status(state: &str, msg: &str, code: &str, path: &str, connection_wanted: bool) -> Option<String> {
+    if state == "connected" && !connection_wanted { return None; }
+    let path = if state == "connected" { path } else { "" };
+    *PUBLIC_STATUS.lock().unwrap() = (state.into(), msg.into(), code.into(), path.into());
+    Some(status_message(state, msg, code, path))
+}
+pub(crate) fn replay_status_script() -> String {
+    let s = PUBLIC_STATUS.lock().unwrap();
+    status_message(if s.0.is_empty() { "disconnected" } else { &s.0 }, &s.1, &s.2, &s.3)
+}
+
 pub fn notify(app: &AppHandle, state: &str, msg: &str) { notify_code(app, state, msg, ""); }
 
 pub fn notify_code(app: &AppHandle, state: &str, msg: &str, code: &str) {
+    let Some(js) = publish_status(state, msg, code, &cur_path(), wanted(app)) else { return; };
     // 30.09: сбой подключения - воронка связи мимо туннеля (если сервер её включил этому человеку), не чаще раза в 15 мин
     if state == "error" && code != "guest_expired" {
         if let Ok(d) = data_dir(app) {
@@ -1202,17 +1221,12 @@ pub fn notify_code(app: &AppHandle, state: &str, msg: &str, code: &str) {
         }
     }
     if let Some(w) = app.get_webview_window("main") {
-        let js = format!(
-            "window.__INS_VPN={s};if({s}==='connected'&&!window.__INS_CONN_AT)window.__INS_CONN_AT=Date.now();if({s}==='disconnected')window.__INS_CONN_AT=0;window.dispatchEvent(new CustomEvent('ins:vpn',{{detail:{{state:{s},msg:{m},code:{c}}}}}))",
-            s = serde_json::to_string(state).unwrap_or_default(),
-            m = serde_json::to_string(msg).unwrap_or_default(),
-            c = serde_json::to_string(code).unwrap_or_default()
-        );
         let _ = w.eval(&js);
     }
 }
 
 pub fn stop(app: &AppHandle) {
+    let _ = publish_status("disconnected", "", "", "", false);
     crate::telemetry::disconnect();   // 01.10: vpn.disconnect (сколько был подключён, байты, причина)
     set_wanted(app, false);   // любая остановка из приложения — не переподключаемся
     bump_gen(app);            // незаконченный запуск, сторож и гостевой таймер старого подключения больше не действуют

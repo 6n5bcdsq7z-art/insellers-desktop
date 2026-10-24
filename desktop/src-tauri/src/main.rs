@@ -552,6 +552,7 @@ fn init_script(token: &str, version: &str, bridge_nonce: &str) -> String {
     connectGuest: function (u, t) {{ inv("vpn_guest", {{ url: String(u), until: String(t) }}); }},
     getGuestUntil: function () {{ var g = +window.__INS_GUEST_UNTIL || 0; return String(g > Date.now() ? g : 0); }},
     getVpnState: function () {{ return window.__INS_VPN || "disconnected"; }},
+    getDiag: function () {{ return JSON.stringify({{ path_now: window.__INS_VPN === "connected" ? (window.__INS_PATH_NOW || "") : "" }}); }},
     setAccessUntil: function (ms) {{ inv("set_access", {{ ms: String(ms) }}); }},
     // 29.09: проверка ЧЕРЕЗ туннель из ядра - ответ событием window "ins:probe" {{ok, ms, how}} и в window.__INS_PROBE
     probe: function () {{ inv("probe"); }},
@@ -704,8 +705,8 @@ fn build_main(app: &AppHandle) -> tauri::Result<()> {
                 if p.event() == tauri::webview::PageLoadEvent::Started { arm_page_fallback(w.app_handle()); }
                 else { PAGE_DONE_AT.store(now_ms(), std::sync::atomic::Ordering::Relaxed); }
             }
-            if p.event() == tauri::webview::PageLoadEvent::Finished && p.url().host_str() == Some(HOST) && vpn_running(w.app_handle()) {
-                let _ = w.eval("if(!window.__INS_VPN||window.__INS_VPN==='disconnected'){window.__INS_VPN='connected';if(!window.__INS_CONN_AT)window.__INS_CONN_AT=Date.now();window.dispatchEvent(new CustomEvent('ins:vpn',{detail:{state:'connected',msg:'',code:''}}))}");
+            if p.event() == tauri::webview::PageLoadEvent::Finished && p.url().host_str() == Some(HOST) {
+                let _ = w.eval(&vpn::replay_status_script());
             }
         })
         // 29.09: запрос НОВОГО окна (ссылка target=_blank или window.open внутри рекламного iframe - это нажатие на рекламу)
