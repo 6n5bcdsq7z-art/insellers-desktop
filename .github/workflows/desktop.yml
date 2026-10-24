@@ -78,6 +78,13 @@ jobs:
         with: { node-version: 20 }
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: "${{ matrix.rust_targets }}" }
+      - name: Process exit recovery regressions
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python tests/engine-lifecycle-regression/run.py
+          else
+            python3 tests/engine-lifecycle-regression/run.py
+          fi
       - uses: swatinem/rust-cache@v2
         with: { workspaces: "desktop/src-tauri -> target" }
       - name: Версия 1.0.<номер сборки>
