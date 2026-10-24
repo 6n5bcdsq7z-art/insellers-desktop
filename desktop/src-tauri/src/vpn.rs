@@ -887,6 +887,48 @@ async fn xray_candidates(app: &AppHandle, client: &reqwest::Client, url: &str, o
 }
 
 /// Запуск ядра (xray или wireproxy) + наблюдение за процессом: упал сам - переподключаемся или сообщаем.
+/// Either process failing breaks the same connection. Claim both slots once so
+/// the peer's termination event cannot schedule a second reconnect.
+fn engine_terminated(app: &AppHandle, pid: u32, router_exit: bool, code: Option<i32>) {
+    let failed_gen = cur_gen(app);
+    let (child, router) = {
+        let st = app.state::<VpnState>();
+        let mut child = st.child.lock().unwrap();
+        let mut router = st.router.lock().unwrap();
+        let slot = if router_exit { &*router } else { &*child };
+        if slot.as_ref().map(|c| c.pid()) != Some(pid) { return; }
+        (child.take(), router.take())
+    };
+    if let Some(c) = child { let _ = c.kill(); }
+    if let Some(r) = router { let _ = r.kill(); }
+    if !wanted(app) || cur_gen(app) != failed_gen { return; }
+    crate::telemetry::core_panic(if router_exit { "маршрутизатор завершился" } else { "ядро завершилось" }, code);
+    crate::telemetry::set_stop_reason("core_crash");
+    let ks = crate::pref("killswitch");
+    if !ks { crate::tun::down(); set_proxy(false); }
+    if crate::pref("reconnect") {
+        let n = app.state::<VpnState>().retries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        notify(app, "connecting", if ks { "Соединение прервано - интернет на паузе, переподключаемся…" } else { "Соединение прервано - переподключаемся…" });
+        let b = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs([2u64, 5, 10, 20, 30][(n as usize).min(4)]));
+            // A later manual connection must not be restarted by this crash.
+            if !wanted(&b) || cur_gen(&b) != failed_gen { return; }
+            match tauri::async_runtime::block_on(start(b.clone())) {
+                Ok(()) => { b.state::<VpnState>().retries.store(0, std::sync::atomic::Ordering::SeqCst); notify(&b, "connected", "Соединение восстановлено"); }
+                Err(e) if e == "CANCELLED" || e == "BUSY" => {}
+                Err(e) => {
+                    if cur_gen(&b) != failed_gen { return; }
+                    if !crate::pref("killswitch") && wanted(&b) { set_proxy(false); }
+                    if wanted(&b) { notify(&b, "error", &e); }
+                }
+            }
+        });
+    } else {
+        notify(app, if ks { "error" } else { "disconnected" }, if ks { "Соединение прервано - интернет на паузе (Kill Switch)" } else { "Соединение прервано" });
+    }
+}
+
 fn launch(app: &AppHandle, bin: &str, run_args: Vec<String>, dir: &PathBuf) -> Result<(), String> {
     notify(app, "connecting", "Запускаем VPN-ядро…");
     let mut command = app.shell().sidecar(bin).map_err(|e| e.to_string())?
@@ -903,34 +945,7 @@ fn launch(app: &AppHandle, bin: &str, run_args: Vec<String>, dir: &PathBuf) -> R
     tauri::async_runtime::spawn(async move {
         while let Some(ev) = rx.recv().await {
             if let CommandEvent::Terminated(tp) = ev {
-                // это наш процесс? Если его уже забрали (отключили, сменили путь) - ничего не делаем
-                let mine = {
-                    let st = a.state::<VpnState>();
-                    let mut g = st.child.lock().unwrap();
-                    if g.as_ref().map(|c| c.pid()) == Some(my_pid) { g.take(); true } else { false }
-                };
-                if !mine { break; }
-                if !wanted(&a) { break; }   // ещё проверяем путь или уже отключились - решает start()
-                crate::telemetry::core_panic("ядро завершилось", tp.code);   // 01.10: ядро упало само, пока VPN нужен
-                crate::telemetry::set_stop_reason("core_crash");
-                let ks = crate::pref("killswitch");
-                if !ks { crate::tun::down(); set_proxy(false); }   // Kill Switch: прокси остаётся на мёртвом порту - интернет на паузе
-                if crate::pref("reconnect") {
-                    let n = a.state::<VpnState>().retries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    notify(&a, "connecting", if ks { "Соединение прервано - интернет на паузе, переподключаемся…" } else { "Соединение прервано - переподключаемся…" });
-                    let b = a.clone();
-                    std::thread::spawn(move || {
-                        std::thread::sleep(Duration::from_secs([2u64, 5, 10, 20, 30][(n as usize).min(4)]));
-                        if !wanted(&b) { return; }
-                        match tauri::async_runtime::block_on(start(b.clone())) {
-                            Ok(()) => { b.state::<VpnState>().retries.store(0, std::sync::atomic::Ordering::SeqCst); notify(&b, "connected", "Соединение восстановлено"); }
-                            Err(e) if e == "CANCELLED" || e == "BUSY" => {}
-                            Err(e) => { if !crate::pref("killswitch") && wanted(&b) { set_proxy(false); } if wanted(&b) { notify(&b, "error", &e); } }
-                        }
-                    });
-                } else {
-                    notify(&a, if ks { "error" } else { "disconnected" }, if ks { "Соединение прервано - интернет на паузе (Kill Switch)" } else { "Соединение прервано" });
-                }
+                engine_terminated(&a, my_pid, false, tp.code);
                 break;
             }
         }
@@ -1045,10 +1060,12 @@ fn launch_router_value(app: &AppHandle, dir: &PathBuf, config: &Value) -> Result
         .spawn().map_err(|e| format!("маршрутизатор: {e}"))?;
     let pid = child.pid();
     app.state::<VpnState>().router.lock().unwrap().replace(child);
+    let a = app.clone();
     tauri::async_runtime::spawn(async move {
         while let Some(ev) = rx.recv().await {
             if let CommandEvent::Terminated(t) = ev {
                 crate::remote_log("vpn.router_exit", json!({"pid": pid, "code": t.code}));
+                engine_terminated(&a, pid, true, t.code);
                 break;
             }
         }
