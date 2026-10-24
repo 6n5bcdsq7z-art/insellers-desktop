@@ -4,6 +4,7 @@ use serde_json::json;
 use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
+include!(concat!(env!("OUT_DIR"), "/status.rs"));
 
 static CONNECTION_TRANSITION: Mutex<()> = Mutex::new(());
 static UP_AT: AtomicU64 = AtomicU64::new(0);
@@ -93,6 +94,7 @@ pub fn run() {
     for phase in [Phase::Status, Phase::SetProxy, Phase::ProxyCheck, Phase::RetrySleep, Phase::Wanted, Phase::TimerBefore, Phase::TimerAfter, Phase::FinalReturn] {
         *GATE.0.lock().unwrap() = Gate { phase, entered: false, release: false };
         PROXY.store(false, Ordering::SeqCst); TUN.store(true, Ordering::SeqCst); CORE.store(true, Ordering::SeqCst);
+        let _ = publish_status("connected", "", "", "tuic", true);
         let app = AppHandle(Arc::new(VpnState { guest_gen: AtomicU32::new(1), wanted: AtomicBool::new(false), child: Mutex::new(Some(Child)) }));
         let worker_app = app.clone();
         let worker = std::thread::spawn(move || {
@@ -116,6 +118,8 @@ pub fn run() {
         assert!(!PROXY.load(Ordering::SeqCst), "stale startup restored proxy at {phase:?}");
         assert!(!app.0.wanted.load(Ordering::SeqCst), "stale startup restored wanted at {phase:?}");
         assert!(!CORE.load(Ordering::SeqCst) && !TUN.load(Ordering::SeqCst));
+        assert_eq!(PUBLIC_STATUS.lock().unwrap().0, "disconnected");
+        assert!(PUBLIC_STATUS.lock().unwrap().3.is_empty(), "cancelled protocol must leave the verified UI snapshot");
         println!("PASS actual Desktop cancellation during {phase:?}: no proxy/TUN/core/wanted resurrection");
     }
     *GATE.0.lock().unwrap() = Gate { phase: Phase::None, entered: false, release: true };
