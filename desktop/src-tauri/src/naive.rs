@@ -5,18 +5,25 @@ pub const INNER: u16 = 38819;
 
 pub fn binary_name(kind: &str) -> &str { if kind == "anytls" { "tuic" } else { kind } }
 
+pub fn executable_name(kind: &str) -> String {
+    format!("{}{}", binary_name(kind), if cfg!(target_os = "windows") { ".exe" } else { "" })
+}
+
 pub fn available() -> bool { available_protocol("naive") }
 
 pub fn available_protocol(kind: &str) -> bool {
     if !matches!(kind, "naive" | "tuic" | "mieru" | "anytls") { return false; }
-    if cfg!(target_os = "windows") { return false; } // no pinned Windows engine yet
+    if cfg!(target_os = "windows") && !cfg!(target_arch = "x86_64") { return false; }
     if cfg!(target_os = "macos") {
         let major = std::process::Command::new("/usr/bin/sw_vers").arg("-productVersion").output().ok()
             .filter(|o| o.status.success()).and_then(|o| String::from_utf8(o.stdout).ok())
             .and_then(|v| v.trim().split('.').next()?.parse::<u32>().ok()).unwrap_or(0);
         if major < match kind { "tuic" | "anytls" => 26, "mieru" => 12, _ => 13 } { return false; }
     }
-    std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.join(binary_name(kind)))).map(|p| p.is_file()).unwrap_or(false)
+    std::env::current_exe().ok().and_then(|p| p.parent().map(|dir| {
+        dir.join(executable_name(kind)).is_file()
+            && (!cfg!(target_os = "windows") || !matches!(kind, "tuic" | "anytls") || dir.join("libcronet.dll").is_file())
+    })).unwrap_or(false)
 }
 
 pub fn subscription_url(raw: &str) -> Result<String, String> { subscription_url_for(raw, "naive") }
@@ -97,7 +104,8 @@ pub fn router(profile: &Value, now: u64) -> Result<Value, String> {
         "log":{"loglevel":"warning"},
         "dns":{"queryStrategy":"UseIPv4","hosts":{host:profile["dns"]["ip"]},"servers":[profile["dns"]["url"]]},
         "inbounds":[
-            {"tag":"socks-in","listen":"127.0.0.1","port":38808,"protocol":"socks","settings":{"udp":true}},
+            {"tag":"socks-in","listen":"127.0.0.1","port":38808,"protocol":"socks","settings":{"udp":true},
+                "sniffing":{"enabled":true,"destOverride":["http","tls"],"routeOnly":false}},
             {"tag":"http-in","listen":"127.0.0.1","port":38809,"protocol":"http"},
             {"tag":"probe-in","listen":"127.0.0.1","port":38810,"protocol":"http"},
             {"tag":"page-in","listen":"127.0.0.1","port":38815,"protocol":"http"}

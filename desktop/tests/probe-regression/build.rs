@@ -15,6 +15,12 @@ fn main() {
      +&section("fn manual_choice(","/// Описание пути");
  fs::write(out.join("selection.rs"),format!("use serde_json::{{Value,json}};\n{}",selection)).unwrap();
 
+ // stop() also clears the verified UI snapshot. Compile that production
+ // publisher, rather than replacing it with a no-op in the lifecycle fixture.
+ let a=v.find("// Verified native UI state;").unwrap();
+ let b=a+v[a..].find("pub fn notify(").unwrap();
+ fs::write(out.join("status.rs"),&v[a..b]).unwrap();
+
  println!("cargo:rerun-if-env-changed=INSELLERS_VPN_CANCEL_SOURCE");
  let cancellation_src=env::var("INSELLERS_VPN_CANCEL_SOURCE").ok().map(|p|fs::read_to_string(p).unwrap()).unwrap_or(v);
  let section=|start:&str,end:&str| {let a=cancellation_src.find(start).unwrap();let b=a+cancellation_src[a..].find(end).unwrap();cancellation_src[a..b].to_owned()};

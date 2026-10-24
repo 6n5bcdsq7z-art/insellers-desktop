@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	Version = "7" // Naive process bypass must be installed before activating its TUN.
+	Version = "8" // Naive process bypass must be installed before activating its TUN.
 	Listen  = "127.0.0.1:38811"
 )
 
@@ -121,7 +121,7 @@ func config(socks int, bypass []string, dns string) ([]byte, error) {
 				// само ядро и помощник - мимо TUN (иначе петля): ядро ходит к серверам и «напрямую» (RU-сайты) с физической сети
 				// This must precede DNS hijacking too: Xray's domestic DNS requests
 				// otherwise return to its own DNS module through core.
-				map[string]any{"process_name": []string{"xray", "xray.exe", "wireproxy", "wireproxy.exe", "naive", "tuic", "mieru", "ins-helper", "ins-helper.exe"},
+				map[string]any{"process_name": []string{"xray", "xray.exe", "wireproxy", "wireproxy.exe", "naive", "naive.exe", "tuic", "tuic.exe", "mieru", "mieru.exe", "ins-helper", "ins-helper.exe"},
 					"outbound": "direct"},
 				map[string]any{"protocol": "dns", "action": "hijack-dns"},
 				// Keep IPv6 rejection and local-network access ahead of web exceptions.
