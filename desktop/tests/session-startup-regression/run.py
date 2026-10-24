@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compile the actual session reader with inert Keychain and private temp files."""
 import argparse
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -9,7 +10,7 @@ p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--source', type=Path, default=Path(__file__).resolve().parents[2] / 'src-tauri/src/main.rs')
 p.add_argument('--rustc', default='rustc')
 a = p.parse_args()
-source = a.source.read_text()
+source = a.source.read_text(encoding="utf-8")
 start = source.index('pub fn load_token() -> String {')
 depth = 1
 end = source.index('{', start) + 1
@@ -56,7 +57,7 @@ fn main() {
 '''
 with tempfile.TemporaryDirectory(prefix='insellers-session-compile-') as directory:
     root = Path(directory)
-    src = root / 'fixture.rs'; src.write_text(actual + '\n' + fixture)
-    exe = root / 'session-fixture'
+    src = root / 'fixture.rs'; src.write_text(actual + '\n' + fixture, encoding='utf-8')
+    exe = root / ('session-fixture.exe' if os.name == 'nt' else 'session-fixture')
     subprocess.run([a.rustc, '--edition=2021', '-Awarnings', str(src), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

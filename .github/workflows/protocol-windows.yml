@@ -1,7 +1,7 @@
 name: Windows protocol engines
 on:
   pull_request:
-    paths: ['desktop/src-tauri/src/naive.rs', 'desktop/src-tauri/src/vpn.rs', 'desktop/tests/engine-lifecycle-regression/**', 'desktop/helper/**', 'ops/deploy/**', '.github/windows_protocol_smoke.py', '.github/workflows/protocol-windows.yml']
+    paths: ['desktop/src-tauri/src/naive.rs', 'desktop/src-tauri/src/vpn.rs', 'desktop/src-tauri/src/main.rs', 'desktop/tests/engine-lifecycle-regression/**', 'desktop/tests/session-startup-regression/**', 'desktop/helper/**', 'ops/deploy/**', '.github/windows_protocol_smoke.py', '.github/workflows/protocol-windows.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -15,7 +15,9 @@ jobs:
         with: { python-version: '3.12' }
       - uses: dtolnay/rust-toolchain@stable
       - name: Process exit recovery regressions
-        run: python desktop/tests/engine-lifecycle-regression/run.py
+        run: |
+          python desktop/tests/engine-lifecycle-regression/run.py
+          python desktop/tests/session-startup-regression/run.py
       - name: Compile actual native configuration generator
         shell: bash
         run: |
