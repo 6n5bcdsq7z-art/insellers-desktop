@@ -6,9 +6,11 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import traceback
 import urllib.request
 import extra_bundle
 import naive_bundle
+import windows_bundle
 
 
 def download(item,cache):
@@ -24,9 +26,15 @@ def download(item,cache):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--desktop',type=Path,required=True)
-    p.add_argument('--target',choices=('universal-apple-darwin','x86_64-unknown-linux-gnu'),required=True)
+    p.add_argument('--target',choices=('universal-apple-darwin','x86_64-unknown-linux-gnu','x86_64-pc-windows-msvc'),required=True)
     p.add_argument('--cache',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
     a=p.parse_args();a.cache.mkdir(parents=True,exist_ok=True)
+    if a.target == 'x86_64-pc-windows-msvc':
+        for item in json.loads(windows_bundle.MANIFEST.read_text()):
+            print('Verifying Windows archive: '+item['name'],flush=True)
+            download(item,a.cache)
+        print(windows_bundle.stage(a.desktop,a.cache,a.output/'all'))
+        return
     platforms=['mac-arm64','mac-x64'] if a.target.startswith('universal') else ['linux-x64']
     for item in json.loads(naive_bundle.MANIFEST.read_text())['assets']:
         if item['platform'] in platforms: download(item,a.cache)
@@ -41,4 +49,13 @@ def main():
     print(str(overlay.resolve()))
 
 
-if __name__=='__main__': main()
+if __name__=='__main__':
+    try: main()
+    except Exception as error:
+        # Public upstream assets only; never dump runner environment or headers.
+        frames = traceback.extract_tb(error.__traceback__)
+        location = Path(frames[-1].filename).name + ':' + str(frames[-1].lineno)
+        detail = str(error) if isinstance(error, (ValueError, FileNotFoundError, urllib.error.HTTPError)) else type(error).__name__
+        detail = (location + ' ' + detail)[:500].replace('%','%25').replace('\n','%0A').replace('\r','%0D')
+        print('::error title=Protocol bundle::'+detail,flush=True)
+        raise SystemExit(1)

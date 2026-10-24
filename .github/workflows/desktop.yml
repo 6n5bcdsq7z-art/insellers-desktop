@@ -18,7 +18,7 @@ on:
       protocol_engines:
         description: "Include real Naive/TUIC/Mieru/AnyTLS engines in a candidate only"
         type: boolean
-        default: false
+        default: true
       stage:
         description: "candidate - собрать и загрузить, людям НЕ публиковать (выпуск - workflow promote); all - сразу всем"
         required: false
@@ -78,6 +78,15 @@ jobs:
         with: { node-version: 20 }
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: "${{ matrix.rust_targets }}" }
+      - name: Process exit recovery regressions
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python tests/engine-lifecycle-regression/run.py
+            python tests/session-startup-regression/run.py
+          else
+            python3 tests/engine-lifecycle-regression/run.py
+            python3 tests/session-startup-regression/run.py
+          fi
       - uses: swatinem/rust-cache@v2
         with: { workspaces: "desktop/src-tauri -> target" }
       - name: Версия 1.0.<номер сборки>
@@ -143,7 +152,7 @@ jobs:
           fi
           chmod +x "$out"/ins-helper-* "$out"/sing-box-*; ls -la "$out"
       - name: Stage pinned protocol engines in candidate
-        if: inputs.protocol_engines && runner.os != 'Windows'
+        if: inputs.protocol_engines
         env:
           REQUESTED_STAGE: ${{ inputs.stage }}
         run: |
@@ -151,6 +160,7 @@ jobs:
           test "$REQUESTED_STAGE" = candidate
           target=x86_64-unknown-linux-gnu
           if [ "$RUNNER_OS" = macOS ]; then target=universal-apple-darwin; fi
+          if [ "$RUNNER_OS" = Windows ]; then target=x86_64-pc-windows-msvc; fi
           python3 ../ops/deploy/protocol_desktop_stage.py --desktop . --target "$target" --cache "$RUNNER_TEMP/protocol-archives" --output "$RUNNER_TEMP/protocol-bundle"
           echo "PROTOCOL_CONFIG=$RUNNER_TEMP/protocol-bundle/all/protocols.tauri.json" >> "$GITHUB_ENV"
       - name: Сборка (+ подпись обновлений)
