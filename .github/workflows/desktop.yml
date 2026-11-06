@@ -15,6 +15,11 @@ on:
         description: "What's new in English (notes_en; empty - the block is hidden for English)"
         required: false
         default: ""
+      release_version:
+        description: "Optional explicit version, e.g. 1.0.185; empty keeps automatic numbering"
+        type: string
+        required: false
+        default: ""
       protocol_engines:
         description: "Include real Naive/TUIC/Mieru/AnyTLS engines in a candidate only"
         type: boolean
@@ -35,11 +40,17 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       build: ${{ steps.c.outputs.build }}
+      version: ${{ steps.c.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - id: c
+        env:
+          REQUESTED_VERSION: ${{ inputs.release_version }}
         run: |
+          VER="${REQUESTED_VERSION:-1.0.$((GITHUB_RUN_NUMBER + 100))}"
+          [[ "$VER" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo "Invalid release version"; exit 1; }
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ -n "$(git log --since='25 hours ago' --format=%h -- desktop)" ]; then
             echo build=true >> "$GITHUB_OUTPUT"; else echo build=false >> "$GITHUB_OUTPUT"; echo "desktop/ не менялась - сборки нет"; fi
 
@@ -67,7 +78,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Номер версии (1.0.(100 + номер запуска) - новее 1.0.36 из основного репо)
-        run: echo "VER=1.0.$((GITHUB_RUN_NUMBER + 100))" >> "$GITHUB_ENV"
+        env:
+          RELEASE_VERSION: ${{ needs.changes.outputs.version }}
+        run: echo "VER=$RELEASE_VERSION" >> "$GITHUB_ENV"
         shell: bash
       - name: Зависимости Linux
         if: runner.os == 'Linux'
@@ -259,7 +272,7 @@ jobs:
           path: out/*
 
   publish:
-    needs: build
+    needs: [changes, build]
     # 26.09: Linux не обязателен - Mac и Windows публикуются, даже если упала только Linux-сборка (проверка ниже: без
     # файлов Mac/Windows публикации нет). Итог «что не собралось» пишет ночной скрипт владельцу.
     if: ${{ !cancelled() && needs.build.result != 'skipped' }}
@@ -268,7 +281,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Номер версии (1.0.(100 + номер запуска) - новее 1.0.36 из основного репо)
-        run: echo "VER=1.0.$((GITHUB_RUN_NUMBER + 100))" >> "$GITHUB_ENV"
+        env:
+          RELEASE_VERSION: ${{ needs.changes.outputs.version }}
+        run: echo "VER=$RELEASE_VERSION" >> "$GITHUB_ENV"
         shell: bash
       - uses: actions/download-artifact@v4
         with: { path: art, merge-multiple: true }
