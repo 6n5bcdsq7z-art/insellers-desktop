@@ -395,34 +395,38 @@ fn tune(cfg: &mut Value) {
     let mut rules = vec![json!({"type": "field", "network": "udp", "port": "443", "outboundTag": block})];
     rules.extend(old);
     cfg["routing"]["rules"] = Value::Array(rules);
-    // macOS: если маршрут по умолчанию сейчас у чужого туннеля (Happ, Outline и т.п.), наш Xray шёл бы
-    // к серверу ВНУТРИ него — «VPN в VPN», секундный пинг и тормоза видео. Привязываем выход к физической сети.
-    #[cfg(target_os = "macos")]
-    if let Some(ifc) = mac_physical_if_when_hijacked() {
-        if let Some(outs) = cfg["outbounds"].as_array_mut() {
-            for o in outs.iter_mut() {
-                if is_proxy(o) || is_hy(o) {
-                    if !o["streamSettings"].is_object() { o["streamSettings"] = json!({}); }
-                    if !o["streamSettings"]["sockopt"].is_object() { o["streamSettings"]["sockopt"] = json!({}); }
-                    o["streamSettings"]["sockopt"]["interface"] = json!(ifc);
-                }
-            }
+}
+
+/// Refresh local socket binding for fresh AND cached profiles after network changes.
+/// Preserve proxy settings and routing; an unknown interface is not a reason to guess.
+fn refresh_physical_binding(cfg: &mut Value, interface: Option<&str>) {
+    let Some(ifc) = interface else { return; };
+    if let Some(outs) = cfg["outbounds"].as_array_mut() {
+        for o in outs.iter_mut().filter(|o| is_proxy(o) || is_hy(o)) {
+            if !o["streamSettings"].is_object() { o["streamSettings"] = json!({}); }
+            if !o["streamSettings"]["sockopt"].is_object() { o["streamSettings"]["sockopt"] = json!({}); }
+            o["streamSettings"]["sockopt"]["interface"] = json!(ifc);
         }
     }
 }
 
-/// Физический интерфейс (en0 и т.п.), если маршрут по умолчанию сейчас у чужого utun/ppp/ipsec.
+/// Current physical path, including a normal default route after the old VPN stops.
 #[cfg(target_os = "macos")]
-fn mac_physical_if_when_hijacked() -> Option<String> {
+fn mac_physical_interface() -> Option<String> {
     let run = |args: &[&str], prog: &str| std::process::Command::new(prog).args(args).output().ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+        .filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
     let def = run(&["-n", "get", "default"], "/sbin/route");
-    let cur = def.lines().find_map(|l| l.trim().strip_prefix("interface:")).map(|v| v.trim().to_string()).unwrap_or_default();
-    let virt = |n: &str| n.starts_with("utun") || n.starts_with("ppp") || n.starts_with("ipsec") || n.starts_with("tun");
-    if cur.is_empty() || !virt(&cur) { return None; }
     let nwi = run(&["--nwi"], "/usr/sbin/scutil");
+    physical_interface(&def, &nwi)
+}
+
+fn physical_interface(default_route: &str, nwi: &str) -> Option<String> {
+    let cur = default_route.lines().find_map(|l| l.trim().strip_prefix("interface:")).map(str::trim).unwrap_or("");
+    let virt = |n: &str| n.starts_with("utun") || n.starts_with("ppp") || n.starts_with("ipsec") || n.starts_with("tun") || n == "lo0";
+    if cur.is_empty() { return None; }
+    if !virt(cur) { return Some(cur.to_owned()); }
     nwi.lines().find_map(|l| l.trim().strip_prefix("Network interfaces:"))
-        .and_then(|v| v.split_whitespace().find(|n| !virt(n)).map(|n| n.to_string()))
+        .and_then(|v| v.split_whitespace().find(|n| !virt(n)).map(str::to_owned))
 }
 
 /// Есть ли свежая (не старше 14 дней) сохранённая рабочая конфигурация.
@@ -521,7 +525,11 @@ fn path_desc(c: &Value) -> String {
     let t = path_tag(c);
     if t == "auto" { return t; }
     let o = match c["outbounds"].as_array().and_then(|a| a.iter().find(|o| o["tag"].as_str() == Some(t.as_str()))) { Some(o) => o, None => return t };
-    let kind = if is_hy(o) { "hy2" } else { match net_of(o).as_str() { "xhttp" => "xhttp", "grpc" => "grpc", _ => "reality" } };
+    let kind = if is_hy(o) { "hy2" } else { match o["protocol"].as_str().unwrap_or("") {
+        "trojan" => "trojan", "vmess" => "vmess", "shadowsocks" => "shadowsocks",
+        "vless" => match net_of(o).as_str() { "xhttp" => "xhttp", "grpc" => "grpc", "ws" => "websocket", _ => if o.pointer("/streamSettings/security").and_then(Value::as_str)==Some("reality") { "reality" } else { "vless" } },
+        _ => "unknown",
+    }};
     let addr = o.pointer("/settings/vnext/0/address").or_else(|| o.pointer("/settings/servers/0/address"))
         .or_else(|| o.pointer("/settings/address")).and_then(|v| v.as_str()).unwrap_or("");
     format!("{kind}@{addr}")
@@ -714,18 +722,33 @@ pub async fn tunnel_check() -> (bool, u64, String) {
 static LAST_FORCED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Переподключение с повтором: сети ещё нет (сразу после сна) - не сдаёмся ошибкой, повтор раз в 30 с до 10 мин.
+// Transport teardown during a retry must not cancel the user's reconnect
+// intent. Explicit Stop and a newer manual Connect invalidate this epoch.
+static RECONNECT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) fn cancel_reconnect() {
+    RECONNECT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
 fn reconnect_retry(app: &AppHandle, t_ev: u64, reason: &'static str) {
+    let previous_epoch = RECONNECT_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
+    if !wanted(app) { return; }
+    let epoch = previous_epoch.wrapping_add(1);
+    if RECONNECT_EPOCH.compare_exchange(previous_epoch, epoch, std::sync::atomic::Ordering::SeqCst,
+        std::sync::atomic::Ordering::SeqCst).is_err() { return; }
     let b = app.clone();
     std::thread::spawn(move || {
-        // первые 10 мин - раз в 30 с, дальше - раз в 2 мин, пока VPN включён (29.09: не сдаваться)
         for i in 0u32.. {
-            if !wanted(&b) { return; }
-            match tauri::async_runtime::block_on(start(b.clone())) {
+            if RECONNECT_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != epoch { return; }
+            let result = tauri::async_runtime::block_on(start(b.clone()));
+            if RECONNECT_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != epoch { return; }
+            match result {
                 Ok(()) => {
                     let ok = tauri::async_runtime::block_on(tunnel_check()).0;
+                    if RECONNECT_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != epoch { return; }
                     crate::remote_log("vpn.wake_ok", json!({"reason": reason, "secs": crate::now_ms().saturating_sub(t_ev) / 1000,
                         "how": "reconnect", "ok": ok, "try": i}));
-                    notify(&b, "connected", "Соединение восстановлено");
+                    if ok { notify(&b, "connected", "Соединение восстановлено"); return; }
+                    // The core being alive alone is not a working connection.
+                    notify(&b, "error", "Не удалось восстановить связь. Попробуйте другой протокол.");
                     return;
                 }
                 Err(e) if e == "CANCELLED" || e == "BUSY" => return,
@@ -864,6 +887,8 @@ async fn xray_candidates(app: &AppHandle, client: &reqwest::Client, url: &str, o
         raw_cands.push(cached.ok_or_else(|| "Нет сохранённой конфигурации для этого выбора. Повторите подключение при доступной подписке".to_string())?);
     }
     let geo = if prepared { true } else { ensure_geo(app, dir).await };
+    #[cfg(target_os = "macos")]
+    let physical_interface = mac_physical_interface();
     let mut out: Vec<(String, Value)> = Vec::new();
     for mut cfg in raw_cands {
         if cfg.is_null() { continue; }
@@ -875,6 +900,8 @@ async fn xray_candidates(app: &AppHandle, client: &reqwest::Client, url: &str, o
             cfg["log"] = json!({"loglevel": "warning"});
             if !geo { strip_geo_rules(&mut cfg); }
         }
+        #[cfg(target_os = "macos")]
+        refresh_physical_binding(&mut cfg, physical_interface.as_deref());
         if prepared { cfg["inbounds"] = local_inbounds(); }   // config.last.json прежних версий - без входа проверки
         add_probe_rule(&mut cfg);
         out.push((tag, cfg));
@@ -929,6 +956,17 @@ fn engine_terminated(app: &AppHandle, pid: u32, router_exit: bool, code: Option<
     }
 }
 
+// Ignore output from a replaced process and emit each safe category once per process.
+fn record_engine_error(app: &AppHandle, pid: u32, router: bool, bytes: &[u8], seen: &mut std::collections::BTreeSet<&'static str>) {
+    let state = app.state::<VpnState>();
+    let owned = if router { state.router.lock().unwrap().as_ref().map(|c|c.pid()) == Some(pid) }
+                else { state.child.lock().unwrap().as_ref().map(|c|c.pid()) == Some(pid) };
+    if !owned { return; }
+    if let Some(code) = crate::connection_journal::engine_error(bytes) {
+        if seen.insert(code) { crate::remote_log("vpn.engine_error", json!({"component":if router {"router"} else {"engine"},"error_code":code})); }
+    }
+}
+
 fn launch(app: &AppHandle, bin: &str, run_args: Vec<String>, dir: &PathBuf) -> Result<(), String> {
     notify(app, "connecting", "Запускаем VPN-ядро…");
     let mut command = app.shell().sidecar(bin).map_err(|e| e.to_string())?
@@ -943,10 +981,12 @@ fn launch(app: &AppHandle, bin: &str, run_args: Vec<String>, dir: &PathBuf) -> R
     app.state::<VpnState>().child.lock().unwrap().replace(child);
     let a = app.clone();
     tauri::async_runtime::spawn(async move {
+        let mut errors = std::collections::BTreeSet::new();
         while let Some(ev) = rx.recv().await {
-            if let CommandEvent::Terminated(tp) = ev {
-                engine_terminated(&a, my_pid, false, tp.code);
-                break;
+            match ev {
+                CommandEvent::Terminated(tp) => { engine_terminated(&a, my_pid, false, tp.code); break; }
+                CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => record_engine_error(&a, my_pid, false, &bytes, &mut errors),
+                _ => {}
             }
         }
     });
@@ -984,6 +1024,34 @@ const AD_DIRECT: &[&str] = &[
     "metricswpsh.com", "adspector.io", "gstcpx.site", "afrdtech.com", "ad-score.com", "bartcons.com",
     "netdeliveryservice.com", "mcpuwpsh.com", "favorit.work", "hdbkome.com", "hdacode.com", "uuidksinc.net",
 ];
+
+/// A complete server policy replaces defaults. Keep the last valid cached
+/// policy if fetching fails; without one, retain the known SDK tunnel exceptions.
+fn ad_policy(dir: &PathBuf) -> (Vec<String>, Vec<String>) {
+    let cached = std::fs::read(dir.join("ad-hosts.json")).ok()
+        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        .filter(|v| v["direct"].is_array() && v["tunnel"].is_array());
+    let policy = cached.unwrap_or_else(|| json!({"direct":AD_DIRECT,
+        "tunnel":["sad.adsgram.ai","w.tads.me","gigapub.tech"]}));
+    let names = |key: &str| -> Vec<String> {
+        let mut out = Vec::new();
+        for raw in policy[key].as_array().unwrap() {
+            let Some(raw) = raw.as_str() else { continue; };
+            let host = raw.trim().to_ascii_lowercase();
+            if host.len() > 253 || !host.contains('.') || host.parse::<std::net::IpAddr>().is_ok()
+                || !host.split('.').all(|l| !l.is_empty() && l.len() <= 63
+                    && l.as_bytes().first().unwrap().is_ascii_alphanumeric()
+                    && l.as_bytes().last().unwrap().is_ascii_alphanumeric()
+                    && l.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')) { continue; }
+            // Our probes/control plane must continue exercising the selected VPN.
+            if key == "direct" && (host == "insellers.su" || host.ends_with(".insellers.su")) { continue; }
+            let value = format!("domain:{host}");
+            if !out.contains(&value) { out.push(value); }
+        }
+        out
+    };
+    (names("direct"), names("tunnel"))
+}
 
 /// 28.09 (владелец, tasks/00000c): конфиг маршрутизатора перед AmneziaWG. Российское (.ru/.su/.рф, geosite category-ru и
 /// банков/госуслуг/магазинов, geoip:ru, платёжки и антифрод вне .ru) - напрямую с IP человека, остальное - в wireproxy (AWG).
@@ -1040,7 +1108,9 @@ async fn fetch_ad_hosts(client: &reqwest::Client, dir: &PathBuf) {
     if let Ok(r) = r {
         if r.status().is_success() {
             if let Ok(v) = r.json::<Value>().await {
-                if v["direct"].is_array() { let _ = std::fs::write(dir.join("ad-hosts.json"), serde_json::to_vec(&v).unwrap_or_default()); }
+                if v["direct"].is_array() && v["tunnel"].is_array() {
+                    let _ = crate::private_file::write_private(&dir.join("ad-hosts.json"), &v.to_string());
+                }
             }
         }
     }
@@ -1062,11 +1132,15 @@ fn launch_router_value(app: &AppHandle, dir: &PathBuf, config: &Value) -> Result
     app.state::<VpnState>().router.lock().unwrap().replace(child);
     let a = app.clone();
     tauri::async_runtime::spawn(async move {
+        let mut errors = std::collections::BTreeSet::new();
         while let Some(ev) = rx.recv().await {
-            if let CommandEvent::Terminated(t) = ev {
-                crate::remote_log("vpn.router_exit", json!({"pid": pid, "code": t.code}));
-                engine_terminated(&a, pid, true, t.code);
-                break;
+            match ev {
+                CommandEvent::Terminated(t) => {
+                    crate::remote_log("vpn.router_exit", json!({"pid": pid, "code": t.code}));
+                    engine_terminated(&a, pid, true, t.code); break;
+                }
+                CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => record_engine_error(&a, pid, true, &bytes, &mut errors),
+                _ => {}
             }
         }
     });
@@ -1226,6 +1300,13 @@ pub fn notify_code(app: &AppHandle, state: &str, msg: &str, code: &str) {
 }
 
 pub fn stop(app: &AppHandle) {
+    cancel_reconnect();
+    stop_transport(app);
+}
+
+// Internal restart cleanup: preserve the pending recovery intent, but retain
+// generation cancellation and serialized OS teardown.
+fn stop_transport(app: &AppHandle) {
     let _ = publish_status("disconnected", "", "", "", false);
     crate::telemetry::disconnect();   // 01.10: vpn.disconnect (сколько был подключён, байты, причина)
     set_wanted(app, false);   // любая остановка из приложения — не переподключаемся
@@ -1243,11 +1324,59 @@ pub fn stop(app: &AppHandle) {
 /// Kept for the bridge used by older shared web code; manual fallback no longer exists.
 pub fn take_connect_msg() -> String { String::new() }
 
-pub async fn start(app: AppHandle) -> Result<(), String> { start_once(app).await }
+pub async fn start(app: AppHandle) -> Result<(), String> { start_with_handover(app, false).await }
+pub async fn start_user(app: AppHandle) -> Result<(), String> { start_with_handover(app, true).await }
 
-async fn start_once(app: AppHandle) -> Result<(), String> {
+async fn start_with_handover(app: AppHandle, user_requested: bool) -> Result<(), String> {
     if STARTING.swap(true, std::sync::atomic::Ordering::SeqCst) { return Err("BUSY".into()); }
-    let _guard = StartGuard;
+    let _guard = StartGuard; // Keep repeated clicks blocked through rollback, too.
+    let stopped = std::sync::Arc::new(Mutex::new(Vec::new()));
+    crate::remote_log("vpn.start_begin", json!({"manual": user_requested}));
+    #[cfg(target_os = "macos")]
+    let initial_generation = cur_gen(&app);
+    let mut result = start_once(app.clone(), if user_requested { Some(stopped.clone()) } else { None }).await;
+    #[cfg(target_os = "macos")]
+    if result.as_ref().is_err_and(|e| e.starts_with("TUN_FAILED:")) {
+        // Cold boot/tethering can fail after the proxy works but before the
+        // system route settles. Repeat the owner's successful cancel/connect
+        // recovery once; this is recovery, not proof of a DNS/ISP root cause.
+        if cur_gen(&app) != initial_generation.wrapping_add(1) {
+            result = Err("CANCELLED".into());
+        } else if stopped.lock().unwrap().is_empty() {
+            // Restore a displaced working VPN immediately instead of keeping
+            // it offline for a retry. Keep StartGuard held throughout cleanup.
+            stop_transport(&app);
+            let retry_generation = initial_generation.wrapping_add(2);
+            if cur_gen(&app) == retry_generation {
+                crate::remote_log("vpn.start_retry", json!({"try": 2, "reason": "TUN_FAILED"}));
+                notify(&app, "connecting", "Повторяем подключение…");
+                crate::tokio_sleep(2).await;
+            }
+            // Never adopt the newer generation of a user's Cancel, including
+            // a Cancel racing with cleanup or the settling delay.
+            result = if cur_gen(&app) != retry_generation { Err("CANCELLED".into()) }
+                else { start_once(app.clone(), if user_requested { Some(stopped.clone()) } else { None }).await };
+        }
+    }
+    crate::remote_log("vpn.start_end", json!({"result": if result.is_ok() { "connected" } else { "failed" }, "err": result.as_ref().err()}));
+    #[cfg(target_os = "macos")]
+    if result.as_ref().is_err_and(|e| e != "CANCELLED") && !stopped.lock().unwrap().is_empty() {
+        self::stop(&app);
+        let previous = stopped.lock().unwrap().clone();
+        let restored = tauri::async_runtime::spawn_blocking(move ||
+            crate::vpn_handover::restore(&mut crate::vpn_handover::Mac, &previous)).await;
+        crate::remote_log("vpn.handover_restore", json!({"ok": matches!(&restored, Ok(Ok(())))}));
+        let message = match restored {
+            Ok(Ok(())) => "Прежнее VPN-подключение восстановлено".to_string(),
+            Ok(Err(e)) => e,
+            Err(_) => "Включите прежний VPN вручную".to_string(),
+        };
+        return Err(format!("{}. {}", result.unwrap_err(), message));
+    }
+    result
+}
+
+async fn start_once(app: AppHandle, handover: Option<crate::vpn_handover::Stopped>) -> Result<(), String> {
     let my_gen = cur_gen(&app);   // нажали «Отключить» во время подключения — поколение сменится, всё отменяем
     let bootstrap_error = |e: String| format!("BOOTSTRAP:{e}");
     let token = crate::load_token();
@@ -1342,6 +1471,7 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         crate::naive::engine(&profile, crate::naive::INNER, crate::now_ms()).map_err(bootstrap_error)?;
         Some(profile)
     } else { None };
+    crate::remote_log("vpn.selection", json!({"protocol": choice}));
     let is_naive = naive_profile.is_some();
     let prepared_candidates = if awg_path.is_none() && !is_naive {
         Some(xray_candidates(&app, &client, &url, cached_bootstrap, &choice, &dir, &last, &token).await
@@ -1349,16 +1479,34 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
     } else { None };
     if awg_path.is_some() && AWG_ROUTER {
         let _ = ensure_geo(&app, &dir).await;
+    }
+    if (awg_path.is_some() && AWG_ROUTER) || is_naive {
         fetch_ad_hosts(&client, &dir).await;
     }
     if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
-    // A prepared profile does not prove it works. Preserve the user's other VPN.
-    let conflicts = tauri::async_runtime::spawn_blocking(external_connection).await.unwrap_or_default();
+    // Only an explicit Connect action may stop a known foreign Network Extension.
+    let manual_handover = handover.is_some();
+    let mut conflicts = tauri::async_runtime::spawn_blocking(external_connection).await.unwrap_or_default();
+    #[cfg(target_os = "macos")]
     if !conflicts.is_empty() {
-        return Err(format!("OTHER_VPN:Сейчас работает {}. Его подключение сохранено. Для проверки INSELLERS отключите другой VPN вручную", conflicts.join(", ")));
+        if let Some(stopped) = handover {
+            crate::remote_log("vpn.handover_begin", json!({}));
+            notify(&app, "connecting", "Переключаем VPN…");
+            let check_app = app.clone();
+            tauri::async_runtime::spawn_blocking(move ||
+                crate::vpn_handover::disconnect(&mut crate::vpn_handover::Mac, &stopped,
+                    || cur_gen(&check_app) != my_gen)).await
+                .map_err(|_| "Не удалось переключить VPN".to_string())??;
+            crate::remote_log("vpn.handover_stopped", json!({}));
+            conflicts = tauri::async_runtime::spawn_blocking(external_connection).await.unwrap_or_default();
+        }
+    }
+    if !conflicts.is_empty() {
+        let advice = if manual_handover { "Не удалось безопасно переключить его автоматически; отключите это соединение в его приложении" } else { "Для переключения нажмите «Включить»" };
+        return Err(format!("OTHER_VPN:Подключён {}. {}", conflicts.join(", "), advice));
     }
     if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }
-    stop(&app);
+    stop_transport(&app);
     // Our cleanup advances once. A user stop during its blocking OS calls is
     // cancellation, not the generation of a new connection to adopt.
     let my_gen = my_gen.wrapping_add(1);
@@ -1371,7 +1519,8 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
         notify(&app, "connecting", "Запускаем выбранный протокол…");
         let path = dir.join("naive.json");
         let engine = crate::naive::engine(profile, crate::naive::INNER, crate::now_ms())?;
-        let router = crate::naive::router(profile, crate::now_ms())?;
+        let (ad_direct, ad_tunnel) = ad_policy(&dir);
+        let router = crate::naive::router_with_ad_policy(profile, crate::now_ms(), &ad_direct, &ad_tunnel)?;
         if !crate::private_file::write_private(&path, &engine.to_string()) { return Err("Не удалось сохранить настройки".into()); }
         let launched = launch(&app, crate::naive::binary_name(&choice), vec![path.to_string_lossy().to_string()], &dir)
             .and_then(|_| launch_router_value(&app, &dir, &router));
@@ -1495,6 +1644,12 @@ async fn start_once(app: AppHandle) -> Result<(), String> {
             }
             Err(e) => crate::remote_log("vpn.tun_fallback", json!({"reason": e})),
         }
+    }
+    // A failed requested system tunnel is not a connected VPN on macOS.
+    // The outer handover wrapper cleans up and restores the previous service.
+    #[cfg(target_os = "macos")]
+    if !crate::pref("tun_off") && !tun_on {
+        return Err("TUN_FAILED:Системный туннель не передаёт данные. Подключение остановлено; выберите другой протокол".into());
     }
     let transition = CONNECTION_TRANSITION.lock().unwrap();
     if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); }

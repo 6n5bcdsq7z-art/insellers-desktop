@@ -12,7 +12,11 @@ p.add_argument('--case')
 a = p.parse_args()
 text = a.source.read_text(encoding="utf-8")
 if 'fn engine_terminated(' in text:
-    actual = text[text.index('fn engine_terminated('):text.index('\nfn launch(', text.index('fn engine_terminated('))]
+    start = text.index('fn engine_terminated(')
+    end = text.index('\nfn launch(', start)
+    if '\n// Ignore output from a replaced process' in text[start:end]:
+        end = text.index('\n// Ignore output from a replaced process', start)
+    actual = text[start:end]
     assert 'engine_terminated(&a, my_pid, false, tp.code)' in text
     assert 'engine_terminated(&a, pid, true, t.code)' in text
 else:

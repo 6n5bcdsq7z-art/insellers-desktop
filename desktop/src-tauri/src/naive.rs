@@ -124,6 +124,19 @@ pub fn router(profile: &Value, now: u64) -> Result<Value, String> {
     Ok(config)
 }
 
+/// Ad exceptions follow the DNS/UDP/IPv6 guards. Tunnel exceptions take
+/// precedence over a broader direct parent; all other traffic stays proxied.
+pub fn router_with_ad_policy(profile: &Value, now: u64, direct: &[String], tunnel: &[String]) -> Result<Value, String> {
+    let mut config = router(profile, now)?;
+    if !direct.is_empty() {
+        config["outbounds"].as_array_mut().unwrap().push(json!({"tag":"direct","protocol":"freedom"}));
+    }
+    let rules = config["routing"]["rules"].as_array_mut().unwrap();
+    if !tunnel.is_empty() { rules.push(json!({"type":"field","domain":tunnel,"outboundTag":"proxy"})); }
+    if !direct.is_empty() { rules.push(json!({"type":"field","domain":direct,"outboundTag":"direct"})); }
+    Ok(config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

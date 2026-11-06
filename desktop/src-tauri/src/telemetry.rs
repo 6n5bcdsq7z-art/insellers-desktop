@@ -26,7 +26,7 @@ fn server() -> String {
 pub fn set_trigger(t: &str) { *TRIGGER.lock().unwrap() = t.to_string(); }
 pub fn set_stop_reason(r: &str) { *STOP_REASON.lock().unwrap() = r.to_string(); }
 
-fn protocol() -> String { let p = crate::vpn::cur_path(); if p.is_empty() { "auto".into() } else { p.split(['@', '~']).next().unwrap_or("").to_string() } }
+fn protocol() -> String { let desc = crate::vpn::cur_desc(); let p = if desc.is_empty() { crate::vpn::cur_path() } else { desc }; if p.is_empty() { "auto".into() } else { p.split(['@', '~']).next().unwrap_or("").to_string() } }
 fn scrub(s: &str) -> String {
     s.split_whitespace().map(|w| if w.chars().filter(|c| *c == '.').count() == 3 && w.chars().any(|c| c.is_ascii_digit()) { "<ip>" } else { w })
         .collect::<Vec<_>>().join(" ").chars().take(100).collect()

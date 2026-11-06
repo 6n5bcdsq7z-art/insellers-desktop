@@ -24,13 +24,16 @@ fn main() {
  println!("cargo:rerun-if-env-changed=INSELLERS_VPN_CANCEL_SOURCE");
  let cancellation_src=env::var("INSELLERS_VPN_CANCEL_SOURCE").ok().map(|p|fs::read_to_string(p).unwrap()).unwrap_or(v);
  let section=|start:&str,end:&str| {let a=cancellation_src.find(start).unwrap();let b=a+cancellation_src[a..].find(end).unwrap();cancellation_src[a..b].to_owned()};
- let stop=section("pub fn stop(","/// Kept for the bridge");
+ let recovery=if cancellation_src.contains("static RECONNECT_EPOCH:") { section("static RECONNECT_EPOCH:","fn reconnect_retry(") } else {String::new()};
+ let stop=recovery+&section("pub fn stop(","/// Kept for the bridge");
  // Stacked PR bases can still have platform cleanup after this boundary.
  // Compile only the own-stop call, its generation assignment and immediate
  // cancellation guard; neither the old base nor the before-source needs a stub
  // for unrelated kill_other_vpns/platform helpers.
- let stop_call="    stop(&app);";
- let begin_a=cancellation_src.find(stop_call).unwrap();
+ let stop_call=if cancellation_src.contains("    stop_transport(&app);") {"    stop_transport(&app);"} else {"    stop(&app);"};
+ let begin_a=if let Some(marker)=cancellation_src.find("// Our cleanup advances once.") {
+     cancellation_src[..marker].rfind(stop_call).unwrap()
+ } else {cancellation_src.find(stop_call).unwrap()};
  let generation_a=begin_a+cancellation_src[begin_a..].find("    let my_gen = ").unwrap();
  let generation_b=generation_a+cancellation_src[generation_a..].find('\n').unwrap();
  let next_line=cancellation_src[generation_b+1..].lines().next().unwrap_or("");

@@ -7,6 +7,8 @@
 mod vpn;
 mod naive;
 mod connection_guard;
+mod vpn_handover;
+mod connection_journal;
 mod traffic_probe;
 mod check;
 mod probe;
@@ -168,6 +170,7 @@ static LOG_TIMER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 static LOG_SID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 pub fn remote_log(ev: &str, data: serde_json::Value) {
+    if let Some(path) = data_path("connections.jsonl") { connection_journal::record(&path, ev, &data); }
     use std::sync::atomic::Ordering;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let (n, urgent) = {
@@ -522,6 +525,12 @@ fn init_script(token: &str, version: &str, bridge_nonce: &str) -> String {
   var inv = function (cmd, args) {{
     try {{ location.href = "/__native/" + cmd + "?n=" + {nonce_js} + "&a=" + encodeURIComponent(JSON.stringify(args || {{}})); }} catch (e) {{}}
   }};
+  // Only a trusted Connect/protocol click authorizes replacing another VPN.
+  // Automatic web retries use the same bridge but must not take over the network.
+  var manualConnectUntil = 0;
+  document.addEventListener("click", function (e) {{
+    if (e.isTrusted && e.target && e.target.closest && e.target.closest('#btn-connect, #btn-download, .pr-opt')) manualConnectUntil = Date.now() + 30000;
+  }}, true);
   window.InsellersNative = {{
     isApp: function () {{ return true; }},
     getPlatform: function () {{ return "desktop"; }},
@@ -539,7 +548,7 @@ fn init_script(token: &str, version: &str, bridge_nonce: &str) -> String {
     getPref: function (k) {{ return !!(window.__INS_PREFS || {{}})[k]; }},
     setPref: function (k, v) {{ (window.__INS_PREFS = window.__INS_PREFS || {{}})[k] = !!v; inv("set_pref", {{ key: k, value: !!v }}); }},
     openExternal: function (u) {{ inv("open_external", {{ url: u }}); }},
-    connect: function () {{ inv("vpn_connect"); }},
+    connect: function () {{ var manual = Date.now() < manualConnectUntil; manualConnectUntil = 0; inv("vpn_connect", {{ user_requested: manual }}); }},
     disconnect: function () {{ inv("vpn_disconnect"); }},
     setTheme: function (t) {{ inv("set_theme", {{ theme: String(t) }}); }},
     setLang: function (l) {{ inv("set_lang", {{ lang: String(l) }}); }},
@@ -830,14 +839,26 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let status = MenuItem::with_id(app, "status", l10n(en0, "Не подключено"), false, None::<&str>)?;
     let open = MenuItem::with_id(app, "open", l10n(en0, "Открыть INSELLERS VPN"), true, None::<&str>)?;
     let toggle = MenuItem::with_id(app, "toggle", l10n(en0, "Включить"), true, None::<&str>)?;
+    let journal = MenuItem::with_id(app, "journal", if en0 { "Connection log" } else { "Журнал подключений" }, true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", l10n(en0, "Выйти"), true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&status, &PredefinedMenuItem::separator(app)?, &open, &toggle, &PredefinedMenuItem::separator(app)?, &quit])?;
+    let menu = Menu::with_items(app, &[&status, &PredefinedMenuItem::separator(app)?, &open, &toggle, &journal, &PredefinedMenuItem::separator(app)?, &quit])?;
     let mut tb = TrayIconBuilder::with_id("main")
         .tooltip("INSELLERS VPN")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, e| match e.id.as_ref() {
             "open" => show_main(app),
+            "journal" => {
+                if let Some(path) = data_path("connections.jsonl") {
+                    connection_journal::record(&path, "vpn.journal_open", &serde_json::json!({}));
+                    #[cfg(target_os = "macos")]
+                    { let _ = std::process::Command::new("/usr/bin/open").arg("-t").arg(path).spawn(); }
+                    #[cfg(target_os = "windows")]
+                    { let _ = std::process::Command::new("notepad.exe").arg(path).spawn(); }
+                    #[cfg(target_os = "linux")]
+                    { let _ = std::process::Command::new("xdg-open").arg(path).spawn(); }
+                }
+            },
             "toggle" => {
                 let a = app.clone();
                 if vpn_running(app) { vpn_disconnect(a); }
@@ -921,7 +942,7 @@ async fn native_cmd(app: AppHandle, cmd: &str, arg: serde_json::Value) {
         "set_token" => set_token(app, arg["token"].as_str().unwrap_or_default().to_string()),
         "open_external" => open_external(app, arg["url"].as_str().unwrap_or_default().to_string()),
         "check_update" => { let _ = check_update(app, Some(arg["manual"].as_bool().unwrap_or(false))).await; }
-        "vpn_connect" => { telemetry::set_trigger("manual"); let _ = vpn_connect(app).await; }
+        "vpn_connect" => { let manual = arg["user_requested"].as_bool().unwrap_or(false); telemetry::set_trigger(if manual { "manual" } else { "automatic" }); let _ = vpn_connect_mode(app, manual).await; }
         "vpn_guest" => {
             let url = arg["url"].as_str().unwrap_or_default().to_string();
             let until = now_ms() + GUEST_MAX_MS;
@@ -1035,17 +1056,65 @@ fn swap_token(app: &AppHandle, token: &str) {
 }
 
 #[tauri::command]
-async fn vpn_connect(app: AppHandle) -> Result<(), String> {
+async fn vpn_connect(app: AppHandle) -> Result<(), String> { vpn_connect_mode(app, true).await }
+
+static CONNECT_REQUEST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static CONNECT_CANCEL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ACTIVE_CONNECT_CANCEL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+struct ConnectRequest { cancelled_at: u64 }
+impl Drop for ConnectRequest { fn drop(&mut self) { CONNECT_REQUEST.store(false, std::sync::atomic::Ordering::SeqCst); } }
+fn cancel_connect_request() {
+    CONNECT_CANCEL.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+async fn acquire_connect_request(app: &AppHandle) -> Result<ConnectRequest, String> {
+    use std::sync::atomic::Ordering::SeqCst;
+    let cancelled_at = CONNECT_CANCEL.load(SeqCst);
+    for poll in 0..40 {
+        if CONNECT_CANCEL.load(SeqCst) != cancelled_at { return Err("CANCELLED".into()); }
+        if poll > 0 && ACTIVE_CONNECT_CANCEL.load(SeqCst) == cancelled_at {
+            if let Some(w) = app.get_webview_window("main") { let _ = w.eval(&vpn::replay_status_script()); }
+            return Err("BUSY".into());
+        }
+        if CONNECT_REQUEST.compare_exchange(false, true, SeqCst, SeqCst).is_ok() {
+            let request = ConnectRequest { cancelled_at };
+            if CONNECT_CANCEL.load(SeqCst) != cancelled_at { return Err("CANCELLED".into()); }
+            ACTIVE_CONNECT_CANCEL.store(cancelled_at, SeqCst);
+            return Ok(request);
+        }
+        if ACTIVE_CONNECT_CANCEL.load(SeqCst) == cancelled_at {
+            remote_log("vpn.request_busy", serde_json::json!({}));
+            // Replay the actual state, without overwriting a completed connection.
+            if let Some(w) = app.get_webview_window("main") { let _ = w.eval(&vpn::replay_status_script()); }
+            return Err("BUSY".into());
+        }
+        // The old request was explicitly cancelled, but has not unwound yet.
+        // Keep one subsequent Connect instead of dropping it as a duplicate.
+        if poll == 0 { remote_log("vpn.request_queued", serde_json::json!({})); }
+        tokio_sleep(1).await;
+    }
+    if CONNECT_CANCEL.load(SeqCst) != cancelled_at { return Err("CANCELLED".into()); }
+    vpn::notify(app, "error", "Предыдущее подключение ещё завершается. Попробуйте подключиться ещё раз.");
+    Err("BUSY_TIMEOUT".into())
+}
+async fn vpn_connect_mode(app: AppHandle, user_requested: bool) -> Result<(), String> {
+    let _request = acquire_connect_request(&app).await?;
+    vpn::cancel_reconnect();
     // 01.10 (владелец): портал Wi-Fi - сначала войти в сеть (иначе ложные «не подключается»); повтор в течение минуты - без проверки
-    if !vpn_running(&app) && telemetry::captive().await {
+    let captive = !vpn_running(&app) && telemetry::captive().await;
+    if CONNECT_CANCEL.load(std::sync::atomic::Ordering::SeqCst) != _request.cancelled_at { return Err("CANCELLED".into()); }
+    if captive {
         vpn::notify_code(&app, "error", "Авторизуйтесь в сети Wi-Fi: откройте любой сайт в браузере, войдите в сеть и нажмите «Подключить» ещё раз", "captive");
         return Err("CAPTIVE".into());
     }
+    if CONNECT_CANCEL.load(std::sync::atomic::Ordering::SeqCst) != _request.cancelled_at { return Err("CANCELLED".into()); }
     vpn::notify(&app, "connecting", "");
     telemetry::attempt("");
-    match vpn::start(app.clone()).await {
+    match if user_requested { vpn::start_user(app.clone()).await } else { vpn::start(app.clone()).await } {
         Ok(()) => { remote_log("vpn.connected", serde_json::json!({})); telemetry::result("connected", "", ""); vpn::notify(&app, "connected", &vpn::take_connect_msg()); Ok(()) }
-        Err(e) if e == "BUSY" => Err(e),   // подключение уже идёт — второй раз не запускаем
+        Err(e) if e == "BUSY" => {
+            if let Some(w) = app.get_webview_window("main") { let _ = w.eval(&vpn::replay_status_script()); }
+            Err(e)
+        }
         Err(e) if e == "CANCELLED" => { telemetry::result("cancelled", "", ""); vpn::notify(&app, "disconnected", ""); Err(e) }   // нажали «Отключить» во время подключения
         Err(e) if e.starts_with("BOOTSTRAP:") => {
             let message = e.trim_start_matches("BOOTSTRAP:");
@@ -1059,13 +1128,13 @@ async fn vpn_connect(app: AppHandle) -> Result<(), String> {
             Err(message.to_string())
         }
         Err(e) => {
-            let stage = if e.starts_with("OTHER_VPN:") { "tunnel" } else if e.contains("подписк") || e.contains("доступ") || e.contains("конфиг") { "config" } else { "handshake" };
+            let stage = if e.starts_with("OTHER_VPN:") || e.starts_with("TUN_FAILED:") { "tunnel" } else if e.contains("подписк") || e.contains("доступ") || e.contains("конфиг") { "config" } else { "handshake" };
             telemetry::result("failed", stage, &e);
             remote_log("vpn.start_error", serde_json::json!({"err": e}));
             vpn::stop(&app);
             // код other_vpn — страница покажет подсказку
             if let Some(m) = e.strip_prefix("OTHER_VPN:") { vpn::notify_code(&app, "error", m, "other_vpn"); }
-            else { vpn::notify(&app, "error", &e); }
+            else { vpn::notify(&app, "error", e.trim_start_matches("TUN_FAILED:")); }
             Err(e)
         }
     }
@@ -1073,6 +1142,7 @@ async fn vpn_connect(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn vpn_disconnect(app: AppHandle) {
+    cancel_connect_request();
     telemetry::set_stop_reason("user");
     vpn::set_wanted(&app, false);
     vpn::stop(&app);
@@ -1081,6 +1151,7 @@ fn vpn_disconnect(app: AppHandle) {
 
 #[tauri::command]
 fn logout(app: AppHandle) {
+    cancel_connect_request();
     vpn::set_wanted(&app, false);
     vpn::stop(&app);
     save_token("");
@@ -1263,7 +1334,7 @@ fn main() {
                         if ok { break; }
                         tokio_sleep(4).await;
                     }
-                    if !vpn_running(&h) { telemetry::set_trigger("startup"); let _ = vpn_connect(h).await; }   // человек мог уже подключиться сам
+                    if !vpn_running(&h) { telemetry::set_trigger("startup"); let _ = vpn_connect_mode(h, false).await; }   // человек мог уже подключиться сам
                 });
             }
             let h = app.handle().clone();
