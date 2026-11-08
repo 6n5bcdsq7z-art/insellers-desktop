@@ -16,6 +16,7 @@ struct State {
     results: Mutex<VecDeque<Result<(), String>>>, cancel_at: &'static str,
     displaced: bool, restores: AtomicUsize,
 }
+fn wanted(_: &AppHandle) -> bool { true }
 fn cur_gen(app: &AppHandle) -> u32 { app.0.generation.load(Ordering::SeqCst) }
 fn cancel(app: &AppHandle) { app.0.generation.fetch_add(1, Ordering::SeqCst); }
 fn stop_transport(app: &AppHandle) { stop(app); }
@@ -41,7 +42,8 @@ mod vpn_handover {
 mod tauri { pub mod async_runtime {
     pub async fn spawn_blocking<F: FnOnce() -> R, R>(f: F) -> Result<R, String> { Ok(f()) }
 } }
-async fn start_once(app: AppHandle, handover: Option<vpn_handover::Stopped>) -> Result<(), String> {
+async fn start_once(app: AppHandle, handover: Option<vpn_handover::Stopped>, expected: u32) -> Result<(), String> {
+    if cur_gen(&app) != expected { return Err("CANCELLED".into()); }
     app.0.calls.fetch_add(1, Ordering::SeqCst);
     // Production start_once performs one own cleanup before attempting TUN.
     cancel(&app);
@@ -110,4 +112,13 @@ fn app(results: &[&str], cancel_at: &'static str, displaced: bool) -> AppHandle 
     assert_eq!(run(start_with_handover(a.clone(), false)), Err("BUSY".into()));
     assert_eq!(a.0.calls.load(Ordering::SeqCst), 0);
     assert!(STARTING.load(Ordering::SeqCst));
+}
+
+#[test]
+fn queued_recovery_does_not_adopt_a_new_cancel_generation() {
+    let a=app(&["ok"],"",false);
+    let expected=cur_gen(&a);cancel(&a);
+    assert_eq!(run(start_with_expected(a.clone(),false,Some(expected))),Err("CANCELLED".into()));
+    assert_eq!(a.0.calls.load(Ordering::SeqCst),0);
+    assert!(!STARTING.load(Ordering::SeqCst));
 }

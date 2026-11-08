@@ -12,7 +12,8 @@ fn main() {
  let v=fs::read_to_string(vpn).unwrap();
  let section=|start:&str,end:&str| {let a=v.find(start).unwrap();let b=a+v[a..].find(end).unwrap();v[a..b].to_owned()};
  let selection=section("fn is_hy(","/// Видео")+&section("fn fresh_last(","/// Ссылка на подписку")
-     +&section("fn manual_choice(","/// Описание пути");
+     +&section("fn manual_choice(","/// Описание пути")
+     +&section("fn single_from(","/// Retry only transient");
  fs::write(out.join("selection.rs"),format!("use serde_json::{{Value,json}};\n{}",selection)).unwrap();
 
  // stop() also clears the verified UI snapshot. Compile that production

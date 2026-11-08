@@ -379,6 +379,23 @@ fn pick_config(raw: Value, choice: &str) -> Value {
     c
 }
 
+/// Same-variant server candidates are opt-in, never inferred from a mixed catalogue.
+fn same_protocol_reserves(cfg: &Value, choice: &str) -> Vec<Value> {
+    if !choice.starts_with("cfg:AUTO|") { return Vec::new(); }
+    let Some(outs) = cfg["outbounds"].as_array() else { return Vec::new(); };
+    let Some(main) = outs.iter().find(|o| is_proxy(o) || is_hy(o)) else { return Vec::new(); };
+    let signature = |o: &Value| json!([
+        o["protocol"], net_of(o), o.pointer("/streamSettings/security"),
+        o.pointer("/streamSettings/realitySettings/fingerprint").or_else(|| o.pointer("/streamSettings/tlsSettings/fingerprint")),
+        o.pointer("/settings/vnext/0/users/0/flow"), o.pointer("/streamSettings/sockopt/dialerProxy"),
+        o.pointer("/streamSettings/xhttpSettings/mode"), o.pointer("/streamSettings/xhttpSettings/extra"),
+        o.pointer("/streamSettings/finalmask/quicParams")
+    ]);
+    outs.iter().filter(|o| *o != main && o["tag"].as_str().unwrap_or("").starts_with("reserve:")
+        && (is_proxy(o) || is_hy(o)) && signature(o) == signature(main))
+        .take(1).map(|o| single_from(cfg, o)).collect()
+}
+
 /// Видео (аудит 24.09): QUIC (UDP 443) через Reality+Vision не ходит — блокируем сразу, чтобы шли по TCP.
 fn tune(cfg: &mut Value) {
     let block = cfg["outbounds"].as_array().and_then(|a| a.iter().find(|o| o["protocol"] == "blackhole"))
@@ -875,7 +892,9 @@ async fn xray_candidates(app: &AppHandle, client: &reqwest::Client, url: &str, o
         // Preserve the server recommendation across all supported transports.
         let selected = pick_config(raw, choice);
         if selected.is_null() { return Err("Выбранный протокол отсутствует в подписке. Выберите другой протокол".into()); }
+        let reserves = same_protocol_reserves(&selected, choice);
         raw_cands.push(selected);
+        raw_cands.extend(reserves);
         // ручной выбор протокола - только он (26.09, владелец: при ручном выборе сами не переключаем, только сообщаем)
         for c in if manual_choice(choice) { &list[..0] } else { &list[..] } {
             for o in c["outbounds"].as_array().cloned().unwrap_or_default() {
@@ -1176,7 +1195,7 @@ fn http() -> Result<reqwest::Client, String> {
         .redirect(reqwest::redirect::Policy::none())
         .default_headers(h)
         .timeout(Duration::from_secs(20))
-        .user_agent(format!("InsellersVPN/desktop-{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("InsellersVPN/desktop-{} SameProtocolFailover/1", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())
 }
@@ -1328,13 +1347,17 @@ pub async fn start(app: AppHandle) -> Result<(), String> { start_with_handover(a
 pub async fn start_user(app: AppHandle) -> Result<(), String> { start_with_handover(app, true).await }
 
 async fn start_with_handover(app: AppHandle, user_requested: bool) -> Result<(), String> {
+    start_with_expected(app, user_requested, None).await
+}
+
+async fn start_with_expected(app: AppHandle, user_requested: bool, expected: Option<u32>) -> Result<(), String> {
     if STARTING.swap(true, std::sync::atomic::Ordering::SeqCst) { return Err("BUSY".into()); }
     let _guard = StartGuard; // Keep repeated clicks blocked through rollback, too.
     let stopped = std::sync::Arc::new(Mutex::new(Vec::new()));
     crate::remote_log("vpn.start_begin", json!({"manual": user_requested}));
-    #[cfg(target_os = "macos")]
-    let initial_generation = cur_gen(&app);
-    let mut result = start_once(app.clone(), if user_requested { Some(stopped.clone()) } else { None }).await;
+    let initial_generation = expected.unwrap_or_else(|| cur_gen(&app));
+    if cur_gen(&app) != initial_generation || (expected.is_some() && !wanted(&app)) { return Err("CANCELLED".into()); }
+    let mut result = start_once(app.clone(), if user_requested { Some(stopped.clone()) } else { None }, initial_generation).await;
     #[cfg(target_os = "macos")]
     if result.as_ref().is_err_and(|e| e.starts_with("TUN_FAILED:")) {
         // Cold boot/tethering can fail after the proxy works but before the
@@ -1355,7 +1378,7 @@ async fn start_with_handover(app: AppHandle, user_requested: bool) -> Result<(),
             // Never adopt the newer generation of a user's Cancel, including
             // a Cancel racing with cleanup or the settling delay.
             result = if cur_gen(&app) != retry_generation { Err("CANCELLED".into()) }
-                else { start_once(app.clone(), if user_requested { Some(stopped.clone()) } else { None }).await };
+                else { start_once(app.clone(), if user_requested { Some(stopped.clone()) } else { None }, retry_generation).await };
         }
     }
     crate::remote_log("vpn.start_end", json!({"result": if result.is_ok() { "connected" } else { "failed" }, "err": result.as_ref().err()}));
@@ -1376,8 +1399,8 @@ async fn start_with_handover(app: AppHandle, user_requested: bool) -> Result<(),
     result
 }
 
-async fn start_once(app: AppHandle, handover: Option<crate::vpn_handover::Stopped>) -> Result<(), String> {
-    let my_gen = cur_gen(&app);   // нажали «Отключить» во время подключения — поколение сменится, всё отменяем
+async fn start_once(app: AppHandle, handover: Option<crate::vpn_handover::Stopped>, my_gen: u32) -> Result<(), String> {
+    if cur_gen(&app) != my_gen { return Err("CANCELLED".into()); } // queued recovery cannot adopt a newer Cancel/Connect
     let bootstrap_error = |e: String| format!("BOOTSTRAP:{e}");
     let token = crate::load_token();
     let guest = crate::guest_load();
@@ -1580,6 +1603,7 @@ async fn start_once(app: AppHandle, handover: Option<crate::vpn_handover::Stoppe
             let desc = path_desc(&cfg);
             tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_millis(700))).await.ok();
             let (ok, transferred, ms, why) = probe_real_t("32k", 9).await;
+            if cur_gen(&app) != my_gen { kill_child(&app); return Err("CANCELLED".into()); }
             if ok {
                 crate::remote_log("vpn.path_ok", json!({"path": tag, "desc": desc, "try": i + 1,
                     "kbps": kbps(transferred, ms), "bytes": transferred, "how": "real32k"}));
@@ -1595,7 +1619,7 @@ async fn start_once(app: AppHandle, handover: Option<crate::vpn_handover::Stoppe
         // Never cache or activate a path for which no payload was transferred.
         match ok_cfg {
             Some(b) => { if !token.is_empty() { let _ = save_profile(&last, &b, &token, &url, &choice); } }   // запасная копия - только проверенная
-            None if manual_choice(&choice) => return Err("Выбранный протокол не отвечает. Выберите другой сервер или протокол".into()),
+            None if manual_choice(&choice) => return Err("Не удалось подключиться. Попробуйте другой протокол".into()),
             None => return Err("Связь не установилась - проверьте интернет и нажмите «Включить» ещё раз".into()),
         }
     }
@@ -1829,7 +1853,7 @@ async fn start_once(app: AppHandle, handover: Option<crate::vpn_handover::Stoppe
                     if let Ok(u) = sub_url(&pc, &h_token).await {
                         let same_choice = transport_choice(&pc, &h_token).await.ok().as_deref() == Some(h_choice.as_str());
                         if u == h_url && same_choice {
-                            if let Ok(r) = pc.get(&u).header("User-Agent", format!("InsellersVPN/desktop-{}", env!("CARGO_PKG_VERSION"))).send().await {
+                            if let Ok(r) = pc.get(&u).header("User-Agent", format!("InsellersVPN/desktop-{} SameProtocolFailover/1", env!("CARGO_PKG_VERSION"))).send().await {
                                 if r.status().is_success() { body = r.text().await.ok().filter(|t| t.trim_start().starts_with(['[', '{'])); }
                             }
                         }
@@ -1934,10 +1958,33 @@ async fn start_once(app: AppHandle, handover: Option<crate::vpn_handover::Stoppe
                         "ms": took, "kbps": kbps(got, took), "manual": manual_choice(&h_choice)}));
                     crate::check::maybe_run("path_dead");        // 29.09: замер адресов проверки напрямую -> /api/check/result
                     if manual_choice(&h_choice) {
+                        let reserve_available = std::fs::read(h_dir.join("config.json")).ok()
+                            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                            .map(|cfg| same_protocol_reserves(&cfg, &h_choice).iter().any(|c| !is_bad(&path_tag(c))))
+                            .unwrap_or(false);
+                        if reserve_available {
+                            mark_bad(&dead);
+                            notify(&h, "connecting", "Пробуем другой сервер выбранного протокола…");
+                            crate::remote_log("vpn.server_retry", json!({"from":dead,"phase":"path_dead"}));
+                            let b=h.clone();
+                            std::thread::spawn(move || {
+                                match tauri::async_runtime::block_on(start_with_expected(b.clone(), false, Some(watch_gen))) {
+                                    Ok(()) => {}, // verified startup already publishes connected
+                                    Err(e) if e == "CANCELLED" || e == "BUSY" => {},
+                                    Err(e) => {
+                                        if cur_gen(&b) == watch_gen.wrapping_add(1) && wanted(&b) {
+                                            if !crate::pref("killswitch") { set_proxy(false); }
+                                            notify(&b, "error", &e);
+                                        }
+                                    }
+                                }
+                            });
+                            break;
+                        }
                         if crate::now_ms().saturating_sub(manual_warned) > 30 * 60 * 1000 {
                             manual_warned = crate::now_ms();
                             degraded = true; mark(&h, 2);
-                            notify(&h, "degraded", "Выбранный протокол не отвечает. Выберите другой сервер или протокол");
+                            notify(&h, "degraded", "Не удалось подключиться. Попробуйте другой протокол");
                         }
                     } else if let Some(to) = { let t0 = crate::now_ms(); let hc = HOT_CUR.lock().unwrap().clone(); hot_switch(&h, &h_dir, &hc, &h_choice).await.map(|t| (t, t0)) } {
                         // этап 7: без перезапуска ядра

@@ -16,6 +16,25 @@ pub fn run() {
     for choice in ["", "auto"] { assert!(!manual_choice(choice)); }
     println!("PASS actual Desktop selection: exact protocol retained, missing protocol rejected, AWG manual");
 
+    let choice = "cfg:AUTO|reality|-|chrome|-|nofrag";
+    let main = json!({"tag":"proxy","protocol":"vless","settings":{"vnext":[{"address":"192.0.2.1","port":443,"users":[{"flow":"xtls-rprx-vision"}]}]},"streamSettings":{"network":"tcp","security":"reality","realitySettings":{"fingerprint":"chrome","publicKey":"a"}}});
+    let mut reserve=main.clone(); reserve["tag"]=json!("reserve:NL-2"); reserve["settings"]["vnext"][0]["port"]=json!(8391);
+    reserve["streamSettings"]["realitySettings"]["publicKey"]=json!("b");
+    let cfg=json!({"outbounds":[main,reserve.clone(),{"tag":"direct","protocol":"freedom"}],"dns":{"servers":["1.1.1.1"]},"routing":{"rules":[{"inboundTag":["probe-in"],"outboundTag":"proxy"}]}});
+    let next=same_protocol_reserves(&cfg,choice); assert_eq!(next.len(),1);
+    assert_eq!(next[0]["outbounds"][0]["tag"],"reserve:NL-2");
+    assert_eq!(next[0]["routing"]["rules"][0]["outboundTag"],"reserve:NL-2");
+    assert_eq!(next[0]["dns"],cfg["dns"]);
+    assert!(same_protocol_reserves(&next[0],choice).is_empty());
+    for pin in ["cfg:NL-1|reality|-|chrome|-|nofrag","reality","anytls",""] { assert!(same_protocol_reserves(&cfg,pin).is_empty()); }
+    for pointer in ["/protocol","/streamSettings/network","/streamSettings/security","/streamSettings/realitySettings/fingerprint","/settings/vnext/0/users/0/flow"] {
+        let mut bad=cfg.clone(); *bad["outbounds"][1].pointer_mut(pointer).unwrap()=json!("different");
+        assert!(same_protocol_reserves(&bad,choice).is_empty(),"{pointer}");
+    }
+    let mut legacy=cfg.clone();legacy["outbounds"][1]["tag"]=json!("srv:NL-2");assert!(same_protocol_reserves(&legacy,choice).is_empty());
+    assert!(same_protocol_reserves(&json!(null),choice).is_empty());
+    println!("PASS actual Desktop bounded same-protocol reserves: variant, explicit pins, routing, DNS, no loop");
+
     let stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
     let dir=std::env::temp_dir().join(format!("insellers-manual-cache-{}-{stamp}",std::process::id()));
     std::fs::create_dir(&dir).unwrap();
