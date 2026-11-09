@@ -23,6 +23,50 @@ async fn sequence(responses:Vec<(u16,usize)>)->u16 {
 async fn main(){
  manual_selection::run();
  cancellation::run();
+ let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+ let slow=listener.local_addr().unwrap().port();
+ tokio::spawn(async move {
+  let (mut socket,_)=listener.accept().await.unwrap();let mut request=[0u8;4096];let _=socket.read(&mut request).await;
+  tokio::time::sleep(Duration::from_millis(800)).await;
+  let _=socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 32768\r\n\r\n").await;
+  let _=socket.write_all(&vec![b'x';32768]).await;
+ });
+ let bad=mock(503,65536,false).await;
+ let urls=[format!("http://127.0.0.1:{slow}/slow"),format!("http://127.0.0.1:{bad}/bad")];
+ let (ok,bytes,elapsed,_)=traffic_probe::check_routed_urls(32768,Duration::from_millis(1200),&[&urls[0],&urls[1]]).await;
+ assert!(ok&&bytes>=32768&&elapsed<1500,"healthy primary must keep the full deadline when secondary fails");
+ println!("PASS slow healthy primary survives failed secondary within original deadline");
+ let stalled=mock(200,0,true).await;
+ let healthy=mock(200,32768,false).await;
+ let urls=[format!("http://127.0.0.1:{stalled}/stall"),format!("http://127.0.0.1:{healthy}/healthy")];
+ let (ok,bytes,elapsed,_)=traffic_probe::check_routed_urls(32768,Duration::from_millis(1200),&[&urls[0],&urls[1]]).await;
+ assert!(ok&&bytes>=32768&&elapsed<1000,"stalled primary must not consume fallback deadline");
+ println!("PASS fallback starts before stalled primary consumes deadline");
+ let short1=mock(200,20000,false).await;let short2=mock(200,20000,false).await;
+ let urls=[format!("http://127.0.0.1:{short1}/short"),format!("http://127.0.0.1:{short2}/short")];
+ let (ok,bytes,_,_)=traffic_probe::check_routed_urls(32768,Duration::from_secs(2),&[&urls[0],&urls[1]]).await;
+ assert!(!ok&&bytes==20000,"two partial responses must never count as useful payload");
+ println!("PASS racing short responses do not add up to success");
+ let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let partial=listener.local_addr().unwrap().port();
+ tokio::spawn(async move {
+  let (mut socket,_)=listener.accept().await.unwrap();let mut buf=[0u8;4096];let _=socket.read(&mut buf).await;
+  let _=socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 32768\r\n\r\nx").await;
+  tokio::time::sleep(Duration::from_secs(2)).await;
+ });
+ let bad=mock(503,32768,false).await;
+ let urls=[format!("http://127.0.0.1:{partial}/partial"),format!("http://127.0.0.1:{bad}/bad")];
+ let (ok,bytes,_,_)=traffic_probe::check_routed_urls(32768,Duration::from_millis(500),&[&urls[0],&urls[1]]).await;
+ assert!(!ok&&bytes==1,"global deadline must retain actual partial byte evidence");
+ println!("PASS deadline preserves partial byte evidence");
+ let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let port=listener.local_addr().unwrap().port();
+ let worker=tokio::spawn(async move {
+  let (mut socket,_)=listener.accept().await.unwrap();let mut buf=[0u8;4096];let _=socket.read(&mut buf).await;
+  let closed=tokio::time::timeout(Duration::from_secs(1),socket.read(&mut buf)).await.unwrap().unwrap();
+  assert_eq!(closed,0,"cancelled request leaked socket");
+ });
+ let url=format!("http://127.0.0.1:{port}/stall");
+ assert!(tokio::time::timeout(Duration::from_millis(150),traffic_probe::check_routed_urls(32768,Duration::from_secs(6),&[&url])).await.is_err());
+ worker.await.unwrap();println!("PASS cancellation closes blocked Desktop request");
  for (status,size,expected) in [(500,65536,false),(403,65536,false),(200,64,false),(204,0,false),(302,65536,false),(200,32768,true)] {
   let port=mock(status,size,false).await;
   let (ok,_,_,_)=traffic_probe::check_urls(port,32768,Duration::from_secs(2),&["http://fixture.invalid/32k"]).await;
