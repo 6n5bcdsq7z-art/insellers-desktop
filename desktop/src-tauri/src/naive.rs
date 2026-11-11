@@ -97,6 +97,14 @@ pub fn engine(profile: &Value, port: u16, now: u64) -> Result<Value, String> {
     }
 }
 
+/// The owned Moscow DoH endpoint is reachable before and during the VPN.
+/// Keep DNS encrypted and certificate-checked; never exempt arbitrary resolvers.
+pub fn direct_dns_ip(profile: &Value) -> Option<&str> {
+    (profile["dns"]["host"] == "vpn.insellers.su"
+        && profile["dns"]["ip"] == "89.110.97.227")
+        .then_some("89.110.97.227")
+}
+
 pub fn router(profile: &Value, now: u64) -> Result<Value, String> {
     engine(profile, INNER, now)?;
     let host = profile["dns"]["host"].as_str().unwrap();
@@ -121,6 +129,14 @@ pub fn router(profile: &Value, now: u64) -> Result<Value, String> {
         ]}
     });
     if profile["protocol"]!="naive" && profile["protocol"]!="anytls" { config["routing"]["rules"].as_array_mut().unwrap().remove(1); }
+    if direct_dns_ip(profile).is_some() {
+        // NL-1 cannot reliably reach Moscow. Sending its client's DoH through
+        // that same tunnel deadlocks DNS even after the protocol handshake.
+        config["dns"]["tag"] = json!("native-dns");
+        config["outbounds"].as_array_mut().unwrap().push(json!({"tag":"dns-direct","protocol":"freedom"}));
+        config["routing"]["rules"].as_array_mut().unwrap().insert(0,
+            json!({"type":"field","inboundTag":["native-dns"],"outboundTag":"dns-direct"}));
+    }
     Ok(config)
 }
 
@@ -150,9 +166,9 @@ mod tests {
         let r=router(&p,1000).unwrap();
         assert_eq!(r["dns"]["servers"][0],p["dns"]["url"]);
         assert_eq!(r["dns"]["hosts"]["vpn.insellers.su"],"89.110.97.227");
-        assert_eq!(r["routing"]["rules"][0]["network"],"tcp,udp");
-        assert_eq!(r["routing"]["rules"][1]["outboundTag"],"block");
-        assert!(!r.to_string().contains("freedom"));
+        assert_eq!(r["routing"]["rules"][1]["network"],"tcp,udp");
+        assert_eq!(r["routing"]["rules"][2]["outboundTag"],"block");
+        assert_eq!(r["outbounds"][0]["protocol"], "socks");
     }
     #[test] fn endpoint_pin_preserves_tls_identity_for_all_engines() {
         for kind in ["naive", "tuic", "mieru", "anytls"] {
@@ -208,7 +224,35 @@ mod tests {
         assert_eq!(c["outbounds"][0]["client_metadata"],"");
         assert!(c["outbounds"][0]["tls"].get("insecure").is_none());
         assert_eq!(binary_name("anytls"),"tuic");
-        assert_eq!(router(&p,1000).unwrap()["routing"]["rules"][1]["outboundTag"],"block");
+        assert_eq!(router(&p,1000).unwrap()["routing"]["rules"][2]["outboundTag"],"block");
+    }
+    #[test] fn owned_doh_bypasses_failed_egress_without_leaking_client_dns() {
+        for kind in ["naive", "tuic", "mieru", "anytls"] {
+            let mut p=fixture(); p["protocol"]=json!(kind);
+            p["uuid"]=json!("00000000-0000-4000-8000-000000000001");
+            if kind=="mieru" { p["username"]=json!(format!("m_{}", "a".repeat(62))); }
+            let r=router(&p,1000).unwrap();
+            assert_eq!(direct_dns_ip(&p), Some("89.110.97.227"));
+            assert_eq!(r["dns"]["tag"], "native-dns");
+            assert_eq!(r["routing"]["rules"][0], json!({"type":"field","inboundTag":["native-dns"],"outboundTag":"dns-direct"}));
+            // Both client DNS transports still enter the encrypted resolver.
+            assert_eq!(r["routing"]["rules"][1]["network"], "tcp,udp");
+            assert_eq!(r["routing"]["rules"][1]["outboundTag"], "dns-out");
+            assert_eq!(r["dns"]["servers"][0], p["dns"]["url"]);
+            // Ordinary traffic has the original SOCKS default, not freedom.
+            assert_eq!(r["outbounds"][0]["tag"], "proxy");
+            assert_eq!(r["outbounds"][0]["protocol"], "socks");
+        }
+    }
+    #[test] fn non_owned_or_changed_dns_is_never_exempted() {
+        for (host, ip) in [("vpn.insellers.su","1.1.1.1"), ("other.invalid","89.110.97.227"),
+                           ("n2.insellers.su","212.34.151.212")] {
+            let mut p=fixture();p["dns"]=json!({"host":host,"ip":ip,"url":format!("https://{host}/dns-query/fixture")});
+            assert_eq!(direct_dns_ip(&p),None);
+            let r=router(&p,1000).unwrap();
+            assert!(r["dns"].get("tag").is_none());
+            assert!(!r["outbounds"].as_array().unwrap().iter().any(|o| o["protocol"]=="freedom"));
+        }
     }
     #[test] fn real_tuic_and_mieru_configs_have_protocol_specific_auth() {
         let mut p=fixture();p["protocol"]=json!("tuic");p["uuid"]=json!("00000000-0000-4000-8000-000000000001");

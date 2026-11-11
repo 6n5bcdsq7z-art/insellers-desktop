@@ -1631,7 +1631,11 @@ async fn start_once(app: AppHandle, handover: Option<crate::vpn_handover::Stoppe
     if crate::tun::supported() && !crate::pref("tun_off") {
         let cfg_text = if let Some(ref profile) = naive_profile { json!({"outbounds":[{"settings":{"address":crate::naive::endpoint(profile)?}}]}).to_string() } else if is_awg { std::fs::read_to_string(dir.join("awg.conf")).unwrap_or_default() }
                        else { std::fs::read_to_string(dir.join("config.json")).unwrap_or_default() };
-        let bypass = crate::tun::bypass_ips(&cfg_text);
+        let mut bypass = crate::tun::bypass_ips(&cfg_text);
+        if let Some(ip) = naive_profile.as_ref().and_then(crate::naive::direct_dns_ip) {
+            // The direct encrypted resolver must not be recaptured by our TUN.
+            if !bypass.iter().any(|value| value == ip) { bypass.push(ip.to_string()); }
+        }
         let dns = if is_awg { "tcp" } else { "udp" };
         let d2 = dir.clone();
         let r = tauri::async_runtime::spawn_blocking(move || {
