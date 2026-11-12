@@ -1636,7 +1636,7 @@ async fn start_once(app: AppHandle, handover: Option<crate::vpn_handover::Stoppe
             // The direct encrypted resolver must not be recaptured by our TUN.
             if !bypass.iter().any(|value| value == ip) { bypass.push(ip.to_string()); }
         }
-        let dns = if is_awg { "tcp" } else { "udp" };
+        let dns = if is_awg || naive_profile.as_ref().map(crate::naive::requires_tcp_dns).unwrap_or(false) { "tcp" } else { "udp" };
         let d2 = dir.clone();
         let r = tauri::async_runtime::spawn_blocking(move || {
             crate::tun::install(&d2)?;

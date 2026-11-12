@@ -105,14 +105,21 @@ pub fn direct_dns_ip(profile: &Value) -> Option<&str> {
         .then_some("89.110.97.227")
 }
 
+/// These engines carry TCP only. Do not accept a SOCKS UDP association that
+/// can only blackhole encrypted DNS/QUIC until the caller's timeout expires.
+pub fn requires_tcp_dns(profile: &Value) -> bool {
+    matches!(profile["protocol"].as_str(), Some("naive" | "anytls"))
+}
+
 pub fn router(profile: &Value, now: u64) -> Result<Value, String> {
     engine(profile, INNER, now)?;
     let host = profile["dns"]["host"].as_str().unwrap();
+    let tcp_dns = requires_tcp_dns(profile);
     let mut config=json!({
         "log":{"loglevel":"warning"},
         "dns":{"queryStrategy":"UseIPv4","hosts":{host:profile["dns"]["ip"]},"servers":[profile["dns"]["url"]]},
         "inbounds":[
-            {"tag":"socks-in","listen":"127.0.0.1","port":38808,"protocol":"socks","settings":{"udp":true},
+            {"tag":"socks-in","listen":"127.0.0.1","port":38808,"protocol":"socks","settings":{"udp":!tcp_dns},
                 "sniffing":{"enabled":true,"destOverride":["http","tls"],"routeOnly":false}},
             {"tag":"http-in","listen":"127.0.0.1","port":38809,"protocol":"http"},
             {"tag":"probe-in","listen":"127.0.0.1","port":38810,"protocol":"http"},
@@ -128,7 +135,7 @@ pub fn router(profile: &Value, now: u64) -> Result<Value, String> {
             {"type":"field","ip":["::/0"],"outboundTag":"block"}
         ]}
     });
-    if profile["protocol"]!="naive" && profile["protocol"]!="anytls" { config["routing"]["rules"].as_array_mut().unwrap().remove(1); }
+    if !tcp_dns { config["routing"]["rules"].as_array_mut().unwrap().remove(1); }
     if let Some(ip) = direct_dns_ip(profile) {
         // NL-1 cannot reliably reach Moscow. Sending its client's DoH through
         // that same tunnel deadlocks DNS even after the protocol handshake.
@@ -236,10 +243,13 @@ mod tests {
             p["uuid"]=json!("00000000-0000-4000-8000-000000000001");
             if kind=="mieru" { p["username"]=json!(format!("m_{}", "a".repeat(62))); }
             let r=router(&p,1000).unwrap();
+            assert_eq!(requires_tcp_dns(&p), matches!(kind,"naive"|"anytls"));
+            assert_eq!(r["inbounds"][0]["settings"]["udp"], !requires_tcp_dns(&p));
             assert_eq!(direct_dns_ip(&p), Some("89.110.97.227"));
             assert_eq!(r["dns"]["tag"], "native-dns");
             assert_eq!(r["routing"]["rules"][0], json!({"type":"field","inboundTag":["native-dns"],"outboundTag":"dns-direct"}));
-            // Both client DNS transports still enter the encrypted resolver.
+            // TUN DNS uses TCP for TCP-only engines; UDP-capable engines keep
+            // both paths. The DNS route remains ahead of every UDP guard.
             assert_eq!(r["routing"]["rules"][1]["network"], "tcp,udp");
             assert_eq!(r["routing"]["rules"][1]["outboundTag"], "dns-out");
             assert_eq!(r["dns"]["servers"][0], p["dns"]["url"]);
