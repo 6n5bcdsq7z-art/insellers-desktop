@@ -3,10 +3,28 @@ use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub async fn check(port: u16, bytes: u64, budget: Duration) -> (bool, u64, u64, String) {
+    let urls = proxy_targets(bytes);
+    check_urls(port, bytes, budget, &[&urls[0], &urls[1]]).await
+}
+
+fn proxy_targets(bytes: u64) -> [String; 2] {
     let size = if bytes <= 32_768 { "32k" } else { "256k" };
-    let primary = format!("https://vpn.insellers.su/probe/{size}");
-    let fallback = format!("https://speed.cloudflare.com/__down?bytes={bytes}");
-    check_urls(port, bytes, budget, &[&primary, &fallback]).await
+    [format!("https://vpn.insellers.su/probe/{size}"),
+     format!("https://speed.cloudflare.com/__down?bytes={bytes}")]
+}
+
+/// A timed-out bulk transfer is still a failed bulk check. Before tearing down
+/// a path that transferred useful bytes, verify a new complete small transfer
+/// through that same core. No direct-network or HTTP-error fallback is allowed.
+pub(crate) async fn partial_timeout_is_slow(port: u16, received: u64, reason: &str) -> bool {
+    let urls = proxy_targets(32_768);
+    partial_timeout_is_slow_urls(port, received, reason, Duration::from_secs(8), &[&urls[0], &urls[1]]).await
+}
+
+pub(crate) async fn partial_timeout_is_slow_urls(port: u16, received: u64, reason: &str,
+    budget: Duration, urls: &[&str]) -> bool {
+    if reason != "timeout" || received < 32_768 { return false; }
+    check_urls(port, 32_768, budget, urls).await.0
 }
 
 /// After the helper installs its routes, use the OS route rather than the local

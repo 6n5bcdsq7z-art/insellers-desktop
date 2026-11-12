@@ -89,6 +89,27 @@ async fn main(){
  let (ok,_,elapsed,_)=traffic_probe::check_urls(port,32768,Duration::from_millis(500),&["http://fixture.invalid/stalled-body"]).await;
  assert!(!ok&&elapsed<1500,"headers must not reset the body deadline");
  println!("9 real-traffic startup/fallback/deadline cases PASS");
+ // A real stalled bulk body must remain failed. A fresh complete small body
+ // distinguishes slow useful traffic from an unavailable route.
+ let l=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let port=l.local_addr().unwrap().port();
+ tokio::spawn(async move {let (mut s,_)=l.accept().await.unwrap();let mut request=[0u8;4096];let _=s.read(&mut request).await;
+  s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 262144\r\n\r\n").await.unwrap();
+  s.write_all(&vec![b'x';65536]).await.unwrap();tokio::time::sleep(Duration::from_secs(3)).await;});
+ let bulk=traffic_probe::check_urls(port,262144,Duration::from_millis(200),&["http://fixture.invalid/bulk"]).await;
+ assert!(!bulk.0&&bulk.1>=32768&&bulk.3=="timeout","bulk failure must preserve actual progress");
+ let small=mock(200,32768,false).await;
+ assert!(traffic_probe::partial_timeout_is_slow_urls(small,bulk.1,&bulk.3,Duration::from_secs(1),&["http://fixture.invalid/small"]).await);
+ for (status,size) in [(204,0),(500,65536),(200,64),(302,65536)] {
+  let small=mock(status,size,false).await;
+  assert!(!traffic_probe::partial_timeout_is_slow_urls(small,bulk.1,"timeout",Duration::from_secs(1),&["http://fixture.invalid/small"]).await,"invalid small response must not keep route: {status}/{size}");
+ }
+ for (received,reason) in [(0,"timeout"),(16384,"timeout"),(65536,"http 403"),(65536,"short"),(65536,"core")] {
+  let small=mock(200,32768,false).await;
+  assert!(!traffic_probe::partial_timeout_is_slow_urls(small,received,reason,Duration::from_secs(1),&["http://fixture.invalid/small"]).await,"denial/no progress/closed body must retain failure");
+ }
+ let stalled_small=mock(200,32768,true).await;
+ assert!(!traffic_probe::partial_timeout_is_slow_urls(stalled_small,bulk.1,"timeout",Duration::from_millis(200),&["http://fixture.invalid/small"]).await,"a stalled small transfer must retain failure");
+ println!("11 partial-progress/complete-small-body/denial cases PASS; bulk checks unchanged");
  for (status,size,expected) in [(204,0,false),(500,65536,false),(200,64,false),(302,65536,false),(200,32768,true)] {
   let port=mock(status,size,false).await;
   let url=format!("http://127.0.0.1:{port}/routed");
