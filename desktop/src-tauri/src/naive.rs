@@ -129,11 +129,15 @@ pub fn router(profile: &Value, now: u64) -> Result<Value, String> {
         ]}
     });
     if profile["protocol"]!="naive" && profile["protocol"]!="anytls" { config["routing"]["rules"].as_array_mut().unwrap().remove(1); }
-    if direct_dns_ip(profile).is_some() {
+    if let Some(ip) = direct_dns_ip(profile) {
         // NL-1 cannot reliably reach Moscow. Sending its client's DoH through
         // that same tunnel deadlocks DNS even after the protocol handshake.
         config["dns"]["tag"] = json!("native-dns");
-        config["outbounds"].as_array_mut().unwrap().push(json!({"tag":"dns-direct","protocol":"freedom"}));
+        // Freedom's default AsIs dialer uses OS DNS, not dns.hosts. Once TUN
+        // owns the OS resolver this would bootstrap DoH through itself again.
+        // Pin only the TCP destination; DoH keeps its HTTPS name and TLS checks.
+        config["outbounds"].as_array_mut().unwrap().push(json!({"tag":"dns-direct","protocol":"freedom",
+            "settings":{"redirect":format!("{ip}:443")}}));
         config["routing"]["rules"].as_array_mut().unwrap().insert(0,
             json!({"type":"field","inboundTag":["native-dns"],"outboundTag":"dns-direct"}));
     }
@@ -239,6 +243,8 @@ mod tests {
             assert_eq!(r["routing"]["rules"][1]["network"], "tcp,udp");
             assert_eq!(r["routing"]["rules"][1]["outboundTag"], "dns-out");
             assert_eq!(r["dns"]["servers"][0], p["dns"]["url"]);
+            let direct=r["outbounds"].as_array().unwrap().iter().find(|o| o["tag"]=="dns-direct").unwrap();
+            assert_eq!(direct["settings"]["redirect"], "89.110.97.227:443");
             // Ordinary traffic has the original SOCKS default, not freedom.
             assert_eq!(r["outbounds"][0]["tag"], "proxy");
             assert_eq!(r["outbounds"][0]["protocol"], "socks");

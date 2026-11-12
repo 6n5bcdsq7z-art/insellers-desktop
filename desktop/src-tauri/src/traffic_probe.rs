@@ -12,10 +12,34 @@ pub async fn check(port: u16, bytes: u64, budget: Duration) -> (bool, u64, u64, 
 /// After the helper installs its routes, use the OS route rather than the local
 /// proxy. This is a separate check: a working proxy does not prove TUN/DNS works.
 pub async fn check_routed(bytes: u64, budget: Duration) -> (bool, u64, u64, String) {
-    let size = if bytes <= 32_768 { "32k" } else { "256k" };
-    let primary = format!("https://vpn.insellers.su/probe/{size}");
-    let fallback = format!("https://speed.cloudflare.com/__down?bytes={bytes}");
-    check_routed_urls(bytes, budget, &[&primary, &fallback]).await
+    let urls = routed_targets(bytes);
+    check_routed_urls(bytes, budget, &[&urls[0], &urls[1]]).await
+}
+
+fn routed_targets(bytes: u64) -> [String; 2] {
+    // Management addresses are deliberately excluded from TUN. Their success
+    // cannot prove that ordinary system DNS and internet traffic use the VPN.
+    [format!("https://speed.cloudflare.com/__down?bytes={bytes}"),
+     "https://proof.ovh.net/files/1Mb.dat".into()]
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn system_tunnel_gate_uses_independent_non_exempt_https_origins() {
+        for bytes in [32_768, 262_144] {
+            let urls=super::routed_targets(bytes);
+            let hosts:Vec<_>=urls.iter().map(|u| {
+                let u=reqwest::Url::parse(u).unwrap();
+                assert_eq!(u.scheme(), "https");
+                let host=u.host_str().unwrap().to_string();
+                assert!(host.parse::<std::net::IpAddr>().is_err());
+                assert!(host!="insellers.su" && !host.ends_with(".insellers.su"));
+                host
+            }).collect();
+            assert_ne!(hosts[0],hosts[1]);
+        }
+    }
 }
 
 pub(crate) async fn check_routed_urls(want: u64, budget: Duration, urls: &[&str]) -> (bool, u64, u64, String) {
