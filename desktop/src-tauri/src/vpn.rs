@@ -1814,6 +1814,7 @@ async fn start_once(app: AppHandle, handover: Option<crate::vpn_handover::Stoppe
         let mut n = 0u32;
         let mut last_ok_log = 0u64;
         let mut manual_warned = 0u64;
+        let mut slow_warned = 0u64;
         loop {
             if cur_gen(&h) != watch_gen || !wanted(&h) { break; }
             let mut ok = false;
@@ -1837,6 +1838,25 @@ async fn start_once(app: AppHandle, handover: Option<crate::vpn_handover::Stoppe
                     (rok, rb, rms, why) = crate::traffic_probe::check(port, 262_144, Duration::from_secs(15)).await;
                 }
                 if cur_gen(&h) != watch_gen || !wanted(&h) { break; }
+                if !rok {
+                    let slow = crate::traffic_probe::partial_timeout_is_slow(port, rb, &why).await;
+                    if cur_gen(&h) != watch_gen || !wanted(&h) { break; }
+                    if slow {
+                        // Retain the failed bulk result, but do not interrupt a
+                        // usable slow path or trigger the UI's protocol fallback.
+                        mark(&h, 0);
+                        degraded = true;
+                        fails = 0;
+                        let now = crate::now_ms();
+                        if now.saturating_sub(slow_warned) >= 60_000 {
+                            slow_warned = now;
+                            crate::remote_log("vpn.path_slow", json!({"path":cur_path(),"bytes":rb,"ms":rms,"reason":why,"ok":false}));
+                            notify(&h, "connected", "Соединение медленное. Можно выбрать другой протокол.");
+                        }
+                        crate::tokio_sleep(30).await;
+                        continue;
+                    }
+                }
                 got = rb; took = rms;
                 path_ok = rok; dead_why = why;
                 if rok && crate::now_ms().saturating_sub(last_ok_log) > 15 * 60 * 1000 {
