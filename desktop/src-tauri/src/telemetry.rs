@@ -52,6 +52,9 @@ pub fn result(res: &str, stage: &str, code: &str) {
         o["path"] = json!(protocol()); o["server"] = json!(server());
     }
     crate::remote_log("vpn.result", o);
+    if res == "failed" || res == "timeout" {
+        crate::failure_reports::connection_failure(stage, &protocol(), &id, code);
+    }
     if res == "connected" {
         CONNECTED_AT.store(crate::now_ms(), Ordering::Relaxed);
         RX.store(0, Ordering::Relaxed); TX.store(0, Ordering::Relaxed); FIRST_SENT.store(0, Ordering::Relaxed);
@@ -88,6 +91,9 @@ pub fn disconnect() {
     let at = CONNECTED_AT.swap(0, Ordering::Relaxed);
     let reason = { let mut r = STOP_REASON.lock().unwrap(); let v = if r.is_empty() { "unknown".to_string() } else { r.clone() }; r.clear(); v };
     if at == 0 { return; }
+    if ["network_lost", "server", "timeout", "os", "core_crash"].contains(&reason.as_str()) {
+        crate::failure_reports::connection_failure("disconnect", &protocol(), &ATTEMPT.lock().unwrap().clone(), &reason);
+    }
     crate::remote_log("vpn.disconnect", json!({"attempt_id": ATTEMPT.lock().unwrap().clone(), "connected_ms": crate::now_ms().saturating_sub(at),
         "bytes_up": TX.load(Ordering::Relaxed), "bytes_down": RX.load(Ordering::Relaxed), "reason": reason}));
 }
