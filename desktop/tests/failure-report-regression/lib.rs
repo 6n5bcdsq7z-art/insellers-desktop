@@ -24,5 +24,17 @@ fn write_private(p:&std::path::Path,s:&str)->bool{private_file::write_private(p,
  assert_eq!(original,std::fs::read_to_string(&path).unwrap());
  *TOKEN.lock().unwrap()="different-account".into();assert!(!failure_reports::enqueue(body.clone()));
  assert_eq!(original,std::fs::read_to_string(&path).unwrap());
- std::fs::write(&path,"broken").unwrap();assert!(!failure_reports::enqueue(body));
+ std::fs::write(&path,"broken").unwrap();assert!(!failure_reports::enqueue(body.clone()));
+ std::fs::remove_file(&path).unwrap();
+ assert_eq!(failure_reports::enqueue_automatic("vpn:tuic:traffic",body.clone()),Some(true));
+ let pending=std::fs::read_to_string(&path).unwrap();
+ assert_eq!(failure_reports::enqueue_automatic("vpn:tuic:traffic",body.clone()),None);
+ assert_eq!(pending,std::fs::read_to_string(&path).unwrap());
+ std::fs::remove_file(&path).unwrap();
+ assert_eq!(failure_reports::enqueue_automatic("vpn:tuic:traffic",body.clone()),None);
+ assert_eq!(failure_reports::enqueue_automatic("vpn:anytls:tls",body.clone()),Some(true));
+ assert!(!std::fs::read_to_string(data_path("failure-cooldown.json").unwrap()).unwrap().contains("different-account"));
+ std::fs::remove_file(&path).unwrap();
+ *TOKEN.lock().unwrap()="next-account".into();
+ assert_eq!(failure_reports::enqueue_automatic("vpn:tuic:traffic",body),Some(true));
 }

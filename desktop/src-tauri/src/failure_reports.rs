@@ -2,6 +2,7 @@
 use std::sync::Mutex;
 use serde_json::{Value,json};
 static LOCK: Mutex<()> = Mutex::new(());
+static AUTO_LOCK: Mutex<()> = Mutex::new(());
 static SENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 fn owner(token: &str) -> String {
     ring::digest::digest(&ring::digest::SHA256, token.as_bytes()).as_ref().iter().map(|b|format!("{b:02x}")).collect()
@@ -16,6 +17,43 @@ pub fn enqueue(mut body: Value) -> bool {
     body["diag"]["events"]=json!(crate::LOG_QUEUE.lock().map(|q|q.iter().rev().take(60).map(|e|json!({"ts":e["ts"],"ev":e["ev"],"n":e["n"]})).collect::<Vec<_>>()).unwrap_or_default());
     if body.to_string().len()>56000{return false}
     crate::write_private(&path,&json!({"owner":owner(&crate::load_token()),"body":body}).to_string())
+}
+/// Keep the existing receipt unchanged and limit automatic incidents per account/version/kind.
+pub fn enqueue_automatic(kind: &str, body: Value) -> Option<bool> {
+    let Ok(_guard) = AUTO_LOCK.lock() else {return Some(false)};
+    let Some(path) = crate::data_path("failure-cooldown.json") else {return Some(false)};
+    let mut times: serde_json::Map<String, Value> = std::fs::read_to_string(&path).ok()
+        .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    let key = owner(&format!("{}:{}:{kind}", crate::load_token(), env!("CARGO_PKG_VERSION")));
+    let now = crate::now_ms();
+    let before = times.get(&key).and_then(Value::as_u64).unwrap_or(0);
+    if before > 0 && now >= before && now - before < 600_000 {return None}
+    let existed = crate::data_path("pending-failure.json").map(|p|p.exists()).unwrap_or(false);
+    let saved = enqueue(body);
+    if saved && !existed {
+        times.retain(|_, v| v.as_u64().map(|at| now.saturating_sub(at) < 600_000).unwrap_or(false));
+        times.insert(key, json!(now));
+        crate::write_private(&path, &serde_json::to_string(&times).unwrap_or_default());
+    }
+    Some(saved)
+}
+
+pub fn connection_failure(stage: &str, protocol: &str, attempt: &str, cause: &str) {
+    fn identifier(s: &str) -> String {
+        if !s.is_empty() && s.len() <= 64 && s.bytes().all(|c|c.is_ascii_alphanumeric() || b"_.:-".contains(&c)) {s.into()}
+        else {"unknown".into()}
+    }
+    let stage = if ["config","dns","tcp","tls","handshake","tunnel","traffic","disconnect"].contains(&stage) {stage} else {"unknown"}.to_string();
+    let protocol = identifier(protocol); let cause = identifier(cause);
+    let attempt: String = attempt.chars().take(32).collect();
+    std::thread::spawn(move || {
+        let body = json!({"text":"Сбой подключения VPN","n_img":0,"diag":{
+            "platform":std::env::consts::OS,"version":env!("CARGO_PKG_VERSION"),"automatic":true,
+            "failure_stage":stage,"error_code":cause,"protocol":protocol,"attempt_id":attempt}});
+        if enqueue_automatic(&format!("vpn:{protocol}:{stage}"), body) == Some(true) {
+            tauri::async_runtime::block_on(flush());
+        }
+    });
 }
 pub async fn flush() -> bool {
     use std::sync::atomic::Ordering;
