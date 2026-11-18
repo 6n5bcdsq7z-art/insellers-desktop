@@ -326,24 +326,29 @@ jobs:
           cd art && ls -la
           up() { # имя на сервере без пробелов
             local src="$1" dst="$2"
+            local response="$RUNNER_TEMP/upload-$dst.response"
             echo "upload $dst ($(du -h "$src" | cut -f1))"
             curl -fS --retry 3 --retry-delay 5 --max-time 900 -X POST -T "$src" -H "Content-Type: application/octet-stream" \
-              -w "  http=%{http_code} time=%{time_total}s speed=%{speed_upload}B/s\n" -o /tmp/resp.txt \
+              -w "  http=%{http_code} time=%{time_total}s speed=%{speed_upload}B/s\n" -o "$response" \
               -H "X-CI-Key: $KEY" "https://vpn.insellers.su/api/ci/desktop-upload?name=$dst&ver=$VER" 2>&1 | tee -a ../publish.log
-            cat /tmp/resp.txt | tee -a ../publish.log; echo | tee -a ../publish.log
+            cat "$response" | tee -a ../publish.log; echo | tee -a ../publish.log
           }
           WIN=$(ls *-setup.exe 2>/dev/null | head -1); MACTGZ=$(ls *.app.tar.gz 2>/dev/null | head -1); DMG=$(ls *.dmg 2>/dev/null | head -1)
           APPIMG=$(ls *.AppImage 2>/dev/null | head -1); DEB=$(ls *.deb 2>/dev/null | head -1)
-          [ -n "$WIN" ] && [ -n "$MACTGZ" ] && [ -n "$DMG" ] || { echo "нет сборки Mac или Windows - не публикуем" | tee -a ../publish.log; exit 1; }
-          [ -n "$APPIMG" ] || echo "Linux не собрался - публикуем Mac и Windows без него" | tee -a ../publish.log
-          up "$WIN" "INSELLERS-VPN-setup.exe" > ../up1.log 2>&1 &
-          up "$DMG" "INSELLERS-VPN.dmg" > ../up2.log 2>&1 &
-          up "$MACTGZ" "INSELLERS-VPN-mac.app.tar.gz" > ../up3.log 2>&1 &
-          MACTARSIG=$(ls *.app.tar.sig 2>/dev/null | head -1)   # 27.09: подпись распакованного tar - для дельта-обновлений
-          [ -n "$MACTARSIG" ] && { up "$MACTARSIG" "INSELLERS-VPN-mac.app.tar.sig" > ../up6.log 2>&1 & }
-          [ -n "$APPIMG" ] && { up "$APPIMG" "INSELLERS-VPN.AppImage" > ../up4.log 2>&1 & }
-          [ -n "$DEB" ] && { up "$DEB" "INSELLERS-VPN.deb" > ../up5.log 2>&1 & }
-          fail=0; for j in $(jobs -p); do wait $j || fail=1; done
+          MACTARSIG=$(ls *.app.tar.sig 2>/dev/null | head -1)
+          for required in "$WIN" "$MACTGZ" "$DMG" "$APPIMG" "$DEB" "$MACTARSIG" "$WIN.sig" "$MACTGZ.sig" "$APPIMG.sig"; do
+            [[ -n "$required" && -s "$required" ]] || { echo "Missing required release artifact"; exit 1; }
+          done
+          # Save PIDs at launch. A fast failure may already be absent from jobs -p.
+          pids=()
+          up "$WIN" "INSELLERS-VPN-setup.exe" > ../up1.log 2>&1 & pids+=("$!")
+          up "$DMG" "INSELLERS-VPN.dmg" > ../up2.log 2>&1 & pids+=("$!")
+          up "$MACTGZ" "INSELLERS-VPN-mac.app.tar.gz" > ../up3.log 2>&1 & pids+=("$!")
+          up "$APPIMG" "INSELLERS-VPN.AppImage" > ../up4.log 2>&1 & pids+=("$!")
+          up "$DEB" "INSELLERS-VPN.deb" > ../up5.log 2>&1 & pids+=("$!")
+          up "$MACTARSIG" "INSELLERS-VPN-mac.app.tar.sig" > ../up6.log 2>&1 & pids+=("$!")
+          fail=0
+          for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
           cat ../up*.log >> ../publish.log || true
           [ $fail = 0 ] || { echo "upload failed"; exit 1; }
           python3 - <<PY
