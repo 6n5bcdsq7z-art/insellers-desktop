@@ -507,6 +507,7 @@ fn init_script(token: &str, version: &str, bridge_nonce: &str) -> String {
     let ver = serde_json::to_string(version).unwrap_or_else(|_| "\"\"".into());
     let prefs_js = prefs().to_string();
     let has_naive = naive::available();
+    let has_trusttunnel = naive::available_protocol("trusttunnel");
     let has_tuic = naive::available_protocol("tuic");
     let has_anytls = naive::available_protocol("anytls");
     let has_mieru = naive::available_protocol("mieru");
@@ -556,6 +557,7 @@ fn init_script(token: &str, version: &str, bridge_nonce: &str) -> String {
     hasAwg: function () {{ return true; }},
     hasNaive: function () {{ return {has_naive}; }},
     hasTuic: function () {{ return {has_tuic}; }},
+    hasTrustTunnel: function () {{ return {has_trusttunnel}; }},
     hasAnyTls: function () {{ return {has_anytls}; }},
     hasMieru: function () {{ return {has_mieru}; }},
     connectGuest: function (u, t) {{ inv("vpn_guest", {{ url: String(u), until: String(t) }}); }},

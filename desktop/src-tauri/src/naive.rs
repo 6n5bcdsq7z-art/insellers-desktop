@@ -12,13 +12,13 @@ pub fn executable_name(kind: &str) -> String {
 pub fn available() -> bool { available_protocol("naive") }
 
 pub fn available_protocol(kind: &str) -> bool {
-    if !matches!(kind, "naive" | "tuic" | "mieru" | "anytls") { return false; }
+    if !matches!(kind, "naive" | "tuic" | "mieru" | "anytls" | "trusttunnel") { return false; }
     if cfg!(target_os = "windows") && !cfg!(target_arch = "x86_64") { return false; }
     if cfg!(target_os = "macos") {
         let major = std::process::Command::new("/usr/bin/sw_vers").arg("-productVersion").output().ok()
             .filter(|o| o.status.success()).and_then(|o| String::from_utf8(o.stdout).ok())
             .and_then(|v| v.trim().split('.').next()?.parse::<u32>().ok()).unwrap_or(0);
-        if major < match kind { "tuic" | "anytls" => 26, "mieru" => 12, _ => 13 } { return false; }
+        if major < match kind { "tuic" | "anytls" => 26, "mieru" | "trusttunnel" => 12, _ => 13 } { return false; }
     }
     std::env::current_exe().ok().and_then(|p| p.parent().map(|dir| {
         dir.join(executable_name(kind)).is_file()
@@ -29,7 +29,7 @@ pub fn available_protocol(kind: &str) -> bool {
 pub fn subscription_url(raw: &str) -> Result<String, String> { subscription_url_for(raw, "naive") }
 
 pub fn subscription_url_for(raw: &str, kind: &str) -> Result<String, String> {
-    if !matches!(kind, "naive" | "tuic" | "mieru" | "anytls") { return Err("Неверный протокол".into()); }
+    if !matches!(kind, "naive" | "tuic" | "mieru" | "anytls" | "trusttunnel") { return Err("Неверный протокол".into()); }
     let mut u = url::Url::parse(raw).map_err(|_| "Неверная ссылка подписки")?;
     if u.scheme() != "https" || !u.username().is_empty() || u.password().is_some() || u.fragment().is_some() {
         return Err("Подписка требует HTTPS".into());
@@ -63,7 +63,7 @@ pub fn engine(profile: &Value, port: u16, now: u64) -> Result<Value, String> {
     let label = host.strip_suffix(".insellers.su").ok_or_else(invalid)?;
     let hex = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
     let user_ok = if profile["protocol"] == "mieru" { user.strip_prefix("m_").map(|s| s.len()==62 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))).unwrap_or(false) } else { user.strip_prefix("n_").map(hex).unwrap_or(false) };
-    if !matches!(profile["protocol"].as_str(), Some("naive" | "tuic" | "mieru" | "anytls")) || profile["expires_ms"].as_u64().unwrap_or(0) <= now || port < 1024
+    if !matches!(profile["protocol"].as_str(), Some("naive" | "tuic" | "mieru" | "anytls" | "trusttunnel")) || profile["expires_ms"].as_u64().unwrap_or(0) <= now || port < 1024
         || label.is_empty() || !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
         || !user_ok || !hex(pass) { return Err(invalid()); }
     let address = endpoint(profile)?;
@@ -73,6 +73,13 @@ pub fn engine(profile: &Value, port: u16, now: u64) -> Result<Value, String> {
         || u.password().is_some() || u.fragment().is_some() || u.port_or_known_default() != Some(443)
         || dns["ip"].as_str().and_then(|s| s.parse::<std::net::Ipv4Addr>().ok()).is_none() { return Err(invalid()); }
     match profile["protocol"].as_str().unwrap() {
+        "trusttunnel" => {
+            if address != "89.110.97.227" { return Err("Не настроен московский вход TrustTunnel".into()); }
+            // Values above have a restricted alphabet. JSON string quoting is valid TOML here.
+            Ok(Value::String(format!("loglevel = \"error\"\nvpn_mode = \"general\"\nkillswitch_enabled = false\nexclusions = []\n[endpoint]\nhostname = {hostname}\naddresses = [{socket}]\nusername = {username}\npassword = {password}\nskip_verification = false\nupstream_protocol = \"http2\"\n[listener.socks]\naddress = {listener}\n",
+                hostname=json!(host), socket=json!(format!("{address}:{remote_port}")), username=json!(user),
+                password=json!(pass), listener=json!(format!("127.0.0.1:{port}")))))
+        },
         "tuic" => {
             let id=profile["uuid"].as_str().ok_or_else(invalid)?;
             if id.len()!=36 || !id.bytes().enumerate().all(|(i,b)| if [8,13,18,23].contains(&i) { b==b'-' } else { b.is_ascii_hexdigit() }) { return Err(invalid()); }
@@ -170,6 +177,16 @@ mod tests {
     fn fixture() -> Value { json!({"protocol":"naive","server":"r1.insellers.su","server_port":26443,
         "username":format!("n_{}","a".repeat(64)),"password":"b".repeat(64),"expires_ms":2000,
         "dns":{"url":"https://vpn.insellers.su/dns-query/fixture","host":"vpn.insellers.su","ip":"89.110.97.227"}}) }
+    #[test] fn trusttunnel_uses_moscow_tls_and_rejects_direct_or_expired_access() {
+        let mut p=fixture(); p["protocol"]=json!("trusttunnel");p["server_ipv4"]=json!("89.110.97.227");
+        let c=engine(&p,INNER,1000).unwrap();let text=c.as_str().unwrap();
+        assert!(text.contains("hostname = \"r1.insellers.su\""));
+        assert!(text.contains("89.110.97.227:26443"));assert!(text.contains("skip_verification = false"));
+        assert!(text.contains("[listener.socks]"));assert!(text.contains("127.0.0.1:"));
+        p["server_ipv4"]=json!("176.124.198.72");assert!(engine(&p,INNER,1000).is_err());
+        p["server_ipv4"]=json!("89.110.97.227");assert!(engine(&p,INNER,2001).is_err());
+        p["password"]=json!("injected\nsetting=true");assert!(engine(&p,INNER,1000).is_err());
+    }
     #[test] fn actual_engine_and_dns_preserve_tls_and_credentials() {
         let p=fixture();let c=engine(&p,INNER,1000).unwrap();
         assert!(c["proxy"].as_str().unwrap().starts_with("https://n_"));

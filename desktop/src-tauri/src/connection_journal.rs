@@ -5,7 +5,7 @@ static LOCK: Mutex<String> = Mutex::new(String::new());
 const LIMIT: u64 = 1_048_576;
 fn protocol(v: &str) -> &str {
     let p = if v.starts_with("cfg:") { v.split('|').nth(1).unwrap_or("") } else { v.split(['@', '~']).next().unwrap_or("") };
-    if ["auto","proxy","reality","vless","xhttp","hysteria","hysteria2","hy2","awg","amneziawg","naive","naiveproxy","tuic","mieru","anytls","trojan","vmess","ss","shadowsocks"].contains(&p) { p } else { "unknown" }
+    if ["auto","proxy","reality","vless","xhttp","hysteria","hysteria2","hy2","awg","amneziawg","naive","naiveproxy","tuic","mieru","anytls","trusttunnel","trojan","vmess","ss","shadowsocks"].contains(&p) { p } else { "unknown" }
 }
 /// Only fixed categories leave the process reader; engine output may contain credentials.
 pub fn engine_error(bytes: &[u8]) -> Option<&'static str> {
@@ -67,7 +67,7 @@ fn append(path:&Path,line:&str)->std::io::Result<()> {
 #[cfg(test)]mod tests {
  use super::*;
  #[test]fn excludes_credentials_urls_ip_and_arbitrary_error_text(){let x=safe("vpn.result",&json!({"err":"https://user:password@example.test/sub/secret token=SECRET","token":"SECRET","path":"trojan@192.0.2.1","attempt_id":"SECRET","helper":{"token":"SECRET"}}),"abc").to_string();assert!(!x.contains("SECRET")&&!x.contains("password")&&!x.contains("192.0.2.1")&&!x.contains("example.test"));assert!(x.contains("trojan"));}
- #[test]fn classifies_failures_without_copying_payload(){assert_eq!(reason("timeout at secret"),"Нет ответа в отведённое время");assert_eq!(protocol("unexpected-secret"),"unknown");}
+ #[test]fn classifies_failures_without_copying_payload(){assert_eq!(reason("timeout at secret"),"Нет ответа в отведённое время");assert_eq!(protocol("unexpected-secret"),"unknown");assert_eq!(protocol("trusttunnel"),"trusttunnel");}
  #[test]fn engine_errors_are_fixed_categories_only(){
   for (raw,code) in [("TLS handshake failed at https://user:SECRET@example.test", "ENGINE_TLS"),("dial tcp: i/o timeout token=SECRET", "ENGINE_TIMEOUT"),("authentication failed password=SECRET", "ENGINE_AUTH"),("DNS lookup failed example.test", "ENGINE_DNS"),("network is unreachable", "ENGINE_ROUTE"),("read: connection reset by peer", "ENGINE_CONNECTION")] {
    let found=engine_error(raw.as_bytes()).unwrap();assert_eq!(found,code);

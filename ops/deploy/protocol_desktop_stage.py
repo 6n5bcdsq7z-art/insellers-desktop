@@ -11,6 +11,7 @@ import urllib.request
 import extra_bundle
 import naive_bundle
 import windows_bundle
+import trusttunnel_bundle
 
 
 def download(item,cache):
@@ -33,7 +34,9 @@ def main():
         for item in json.loads(windows_bundle.MANIFEST.read_text()):
             print('Verifying Windows archive: '+item['name'],flush=True)
             download(item,a.cache)
-        print(windows_bundle.stage(a.desktop,a.cache,a.output/'all'))
+        overlay = windows_bundle.stage(a.desktop,a.cache,a.output/'all')
+        trusttunnel_bundle.stage(a.desktop,a.cache,a.target,overlay,download)
+        print(overlay)
         return
     platforms=['mac-arm64','mac-x64'] if a.target.startswith('universal') else ['linux-x64']
     for item in json.loads(naive_bundle.MANIFEST.read_text())['assets']:
@@ -46,6 +49,7 @@ def main():
     extra_bundle.put(a.desktop/'src-tauri/resources/protocol-sources.txt',notices.encode(),0o644)
     overlay=a.output/'all/protocols.tauri.json';config=json.loads(overlay.read_text())
     config['bundle']['resources'].append('resources/protocol-sources.txt');overlay.write_text(json.dumps(config,indent=2)+'\n')
+    trusttunnel_bundle.stage(a.desktop,a.cache,a.target,overlay,download)
     print(str(overlay.resolve()))
 
 

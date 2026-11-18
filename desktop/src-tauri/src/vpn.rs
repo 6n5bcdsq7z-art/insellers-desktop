@@ -121,7 +121,7 @@ fn kill_own_xray(keep_pid: Option<u32>) {
         let name = p.name().to_string_lossy().to_lowercase();
         let name = name.strip_suffix(".exe").unwrap_or(&name);
         // и wireproxy (AmneziaWG): «потерянный» после падения держал бы наши порты 38808/38809
-        if !name.contains("xray") && !name.contains("wireproxy") && !matches!(name, "naive" | "tuic" | "mieru" | "anytls") { continue; }
+        if !name.contains("xray") && !name.contains("wireproxy") && !matches!(name, "naive" | "tuic" | "mieru" | "anytls" | "trusttunnel") { continue; }
         if let Some(exe) = p.exe() { if exe.starts_with(&own_dir) { let _ = p.kill(); } }
     }
 }
@@ -535,7 +535,7 @@ static HOT_CUR: Mutex<String> = Mutex::new(String::new());
 static HOT_BAD: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
 fn set_cur_desc(d: &str) { *CUR_DESC.lock().unwrap() = d.to_string(); }
 pub(crate) fn cur_desc() -> String { CUR_DESC.lock().unwrap().clone() }
-fn manual_choice(choice: &str) -> bool { matches!(choice, "naive" | "tuic" | "mieru" | "anytls") || choice == "amneziawg" || choice == "reality" || choice == "xhttp" || choice == "hysteria2" || choice.starts_with("cfg:") }
+fn manual_choice(choice: &str) -> bool { matches!(choice, "naive" | "tuic" | "mieru" | "anytls" | "trusttunnel") || choice == "amneziawg" || choice == "reality" || choice == "xhttp" || choice == "hysteria2" || choice.starts_with("cfg:") }
 
 /// Описание пути для центра диагностики: вид@адрес (xhttp@212.34.151.212); у балансировщика - "auto".
 fn path_desc(c: &Value) -> String {
@@ -992,6 +992,7 @@ fn launch(app: &AppHandle, bin: &str, run_args: Vec<String>, dir: &PathBuf) -> R
         .env("XRAY_LOCATION_ASSET", dir.to_string_lossy().to_string());
     let run_args = match bin {
         "mieru" => { command=command.env("MIERU_CONFIG_JSON_FILE", run_args.first().ok_or("Нет конфигурации")?); vec!["run".into()] },
+        "trusttunnel" => vec!["-c".into(), run_args.first().ok_or("Нет конфигурации")?.clone()],
         "tuic" => vec!["run".into(), "-c".into(), run_args.first().ok_or("Нет конфигурации")?.clone()],
         _ => run_args,
     };
@@ -1479,7 +1480,7 @@ async fn start_once(app: AppHandle, handover: Option<crate::vpn_handover::Stoppe
     } else { None };
     // Obtain usable configuration before disconnecting another working VPN.
     // A failed bootstrap must leave that connectivity path available.
-    let naive_profile = if matches!(choice.as_str(), "naive" | "tuic" | "mieru" | "anytls") {
+    let naive_profile = if matches!(choice.as_str(), "naive" | "tuic" | "mieru" | "anytls" | "trusttunnel") {
         if !crate::naive::available_protocol(&choice) { return Err(bootstrap_error("Движок выбранного протокола не установлен или не поддерживает эту ОС".into())); }
         let cached = cached_profile(&last, &token, &url, &choice);
         let profile = if cached_bootstrap {
@@ -1491,6 +1492,9 @@ async fn start_once(app: AppHandle, handover: Option<crate::vpn_handover::Stoppe
                 Err(e) => return Err(bootstrap_error(e)),
             }
         };
+        if profile["protocol"].as_str() != Some(choice.as_str()) {
+            return Err(bootstrap_error("Сервер выдал другой протокол".into()));
+        }
         crate::naive::engine(&profile, crate::naive::INNER, crate::now_ms()).map_err(bootstrap_error)?;
         Some(profile)
     } else { None };
@@ -1544,7 +1548,8 @@ async fn start_once(app: AppHandle, handover: Option<crate::vpn_handover::Stoppe
         let engine = crate::naive::engine(profile, crate::naive::INNER, crate::now_ms())?;
         let (ad_direct, ad_tunnel) = ad_policy(&dir);
         let router = crate::naive::router_with_ad_policy(profile, crate::now_ms(), &ad_direct, &ad_tunnel)?;
-        if !crate::private_file::write_private(&path, &engine.to_string()) { return Err("Не удалось сохранить настройки".into()); }
+        let settings = engine.as_str().map(str::to_owned).unwrap_or_else(|| engine.to_string());
+        if !crate::private_file::write_private(&path, &settings) { return Err("Не удалось сохранить настройки".into()); }
         let launched = launch(&app, crate::naive::binary_name(&choice), vec![path.to_string_lossy().to_string()], &dir)
             .and_then(|_| launch_router_value(&app, &dir, &router));
         if let Err(e) = launched { kill_child(&app); let _ = std::fs::remove_file(&path); return Err(e); }
