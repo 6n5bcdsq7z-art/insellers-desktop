@@ -1,0 +1,49 @@
+name: Pegas HTTPS acceptance
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - desktop/tests/pegas/**
+      - .github/workflows/pegas-transfer.yml
+permissions:
+  contents: read
+jobs:
+  transfer:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: linux-x86_64
+            endpoint_sha: 91c2ea3db7416a01b5258a4c047ec22890490bc55e1b194206031aa75144f0e7
+            client_sha: 75b7df59351e26462487464de5f3462153e00195f2d40677872fb93a5b44c488
+          - runner: macos-15-intel
+            platform: macos-universal
+            endpoint_sha: 126a5688e922ce8f83d4de2d8a2659b3aab97820184d30f2edbecc0ec4a32ae5
+            client_sha: 932dff4f396811e31c64644bca422808bf3b79c45877aae7956429082a2c7214
+          - runner: macos-15
+            platform: macos-universal
+            endpoint_sha: 126a5688e922ce8f83d4de2d8a2659b3aab97820184d30f2edbecc0ec4a32ae5
+            client_sha: 932dff4f396811e31c64644bca422808bf3b79c45877aae7956429082a2c7214
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify pinned engines and transfer HTTPS through the native client
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          ENDPOINT_SHA: ${{ matrix.endpoint_sha }}
+          CLIENT_SHA: ${{ matrix.client_sha }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          endpoint="trusttunnel-v1.1.0-$PLATFORM"
+          client="trusttunnel_client-v1.1.12-$PLATFORM"
+          curl -fsSLo endpoint.tgz "https://github.com/TrustTunnel/TrustTunnel/releases/download/v1.1.0/$endpoint.tar.gz"
+          curl -fsSLo client.tgz "https://github.com/TrustTunnel/TrustTunnelClient/releases/download/v1.1.12/$client.tar.gz"
+          echo "$ENDPOINT_SHA  endpoint.tgz" | shasum -a 256 -c -
+          echo "$CLIENT_SHA  client.tgz" | shasum -a 256 -c -
+          tar xf endpoint.tgz "$endpoint/trusttunnel_endpoint"
+          tar xf client.tgz "$client/trusttunnel_client"
+          uname -m
+          python3 "$GITHUB_WORKSPACE/desktop/tests/pegas/https_transfer.py" "$client/trusttunnel_client" "$endpoint/trusttunnel_endpoint"
