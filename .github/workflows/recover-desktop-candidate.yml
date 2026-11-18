@@ -1,0 +1,37 @@
+name: Recover a desktop candidate
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Original main desktop build run'
+        required: true
+        type: string
+permissions:
+  actions: read
+  contents: write
+concurrency:
+  group: desktop-publish
+  cancel-in-progress: false
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate original build and reservation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN: ${{ inputs.run_id }}
+        run: python3 .github/recover_candidate.py validate
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          pattern: bundle-*
+          path: artifacts
+      - name: Verify signatures and restore missing files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN: ${{ inputs.run_id }}
+          DESKTOP_UPLOAD_KEY: ${{ secrets.DESKTOP_UPLOAD_KEY }}
+        run: /usr/bin/python3 .github/recover_candidate.py restore
