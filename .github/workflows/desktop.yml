@@ -1,4 +1,5 @@
 name: desktop
+run-name: Desktop ${{ inputs.request_id || github.run_id }}
 # Сборка INSELLERS VPN для Windows и macOS и публикация на vpn.insellers.su/app/desktop/.
 # Запуск: вручную (Actions → desktop → Run workflow) или пушем тега desktop-v*.
 permissions:
@@ -7,6 +8,10 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
+      request_id:
+        description: "Optional caller correlation ID"
+        required: false
+        default: ""
       notes:
         description: "Что нового (показывается в обновлении)"
         required: false
@@ -32,7 +37,7 @@ on:
 
 # новая сборка отменяет ещё идущую старую (публикация при этом строго по очереди)
 concurrency:
-  group: desktop-build-${{ github.ref }}
+  group: desktop-build
   cancel-in-progress: true
 
 jobs:
@@ -47,9 +52,21 @@ jobs:
       - id: c
         env:
           REQUESTED_VERSION: ${{ inputs.release_version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          VER="${REQUESTED_VERSION:-1.0.$((GITHUB_RUN_NUMBER + 100))}"
-          [[ "$VER" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo "Invalid release version"; exit 1; }
+          git fetch --no-tags origin ci-logs:refs/remotes/origin/ci-logs
+          git ls-tree -r --name-only refs/remotes/origin/ci-logs candidates > "$RUNNER_TEMP/desktop-release-files"
+          python3 .github/test_release_version.py
+          VER=$(python3 .github/release_version.py --requested="$REQUESTED_VERSION" --run-number "$GITHUB_RUN_NUMBER" --files "$RUNNER_TEMP/desktop-release-files")
+          python3 - "$VER" "$RUNNER_TEMP/release-reservation.json" <<'PY'
+          import base64,json,os,sys
+          version=sys.argv[1]
+          metadata={'version':version,'build_run':int(os.environ['GITHUB_RUN_ID']),'source_commit':os.environ['GITHUB_SHA']}
+          json.dump({'message':'reserve desktop '+version,'branch':'ci-logs','content':base64.b64encode(json.dumps(metadata).encode()).decode()},open(sys.argv[2],'w'))
+          PY
+          for record in "candidates/reserved-$VER.json" "builds/by-run/$GITHUB_RUN_ID.json"; do
+            gh api -X PUT "repos/${{ github.repository }}/contents/$record" --input "$RUNNER_TEMP/release-reservation.json" >/dev/null
+          done
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ -n "$(git log --since='25 hours ago' --format=%h -- desktop)" ]; then
             echo build=true >> "$GITHUB_OUTPUT"; else echo build=false >> "$GITHUB_OUTPUT"; echo "desktop/ не менялась - сборки нет"; fi
@@ -64,7 +81,7 @@ jobs:
           - os: windows-latest
             args: "--bundles nsis"
             rust_targets: ""
-          - os: macos-latest
+          - os: macos-15-intel
             args: "--target universal-apple-darwin --bundles app,dmg"
             rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
           - os: ubuntu-22.04
@@ -176,6 +193,16 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then target=x86_64-pc-windows-msvc; fi
           python3 ../ops/deploy/protocol_desktop_stage.py --desktop . --target "$target" --cache "$RUNNER_TEMP/protocol-archives" --output "$RUNNER_TEMP/protocol-bundle"
           echo "PROTOCOL_CONFIG=$RUNNER_TEMP/protocol-bundle/all/protocols.tauri.json" >> "$GITHUB_ENV"
+      - name: Verify the actual Pegas executable version
+        if: inputs.protocol_engines
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Windows) PEGAS=src-tauri/binaries/trusttunnel-x86_64-pc-windows-msvc.exe ;;
+            macOS) PEGAS=src-tauri/binaries/trusttunnel-universal-apple-darwin ;;
+            Linux) PEGAS=src-tauri/binaries/trusttunnel-x86_64-unknown-linux-gnu ;;
+          esac
+          test "$("$PEGAS" --version | tr -d '\r')" = "trusttunnel_client 1.1.12"
       - name: Сборка (+ подпись обновлений)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -224,7 +251,7 @@ jobs:
             lipo "$APP/Contents/MacOS/$binary" -verify_arch arm64 x86_64
           done
           if [ -n "${PROTOCOL_CONFIG:-}" ]; then
-            for binary in naive tuic mieru; do
+            for binary in naive tuic mieru trusttunnel; do
               test -x "$APP/Contents/MacOS/$binary"
               lipo "$APP/Contents/MacOS/$binary" -verify_arch arm64 x86_64
               codesign --verify --strict "$APP/Contents/MacOS/$binary"
@@ -275,7 +302,7 @@ jobs:
     needs: [changes, build]
     # 26.09: Linux не обязателен - Mac и Windows публикуются, даже если упала только Linux-сборка (проверка ниже: без
     # файлов Mac/Windows публикации нет). Итог «что не собралось» пишет ночной скрипт владельцу.
-    if: ${{ !cancelled() && needs.build.result != 'skipped' }}
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     concurrency: { group: desktop-publish, cancel-in-progress: false }   # публикации строго по очереди
     timeout-minutes: 45
@@ -326,6 +353,7 @@ jobs:
           mac = {"signature": sig("$MACTGZ.sig"), "url": base + "INSELLERS-VPN-mac.app.tar.gz"}
           latest = {
             "version": os.environ["VER"],
+            "build_run": int(os.environ["GITHUB_RUN_ID"]), "source_commit": os.environ["GITHUB_SHA"],
             "notes": os.environ.get("NOTES") or "Обновление INSELLERS VPN",
             **({"notes_en": os.environ["NOTES_EN"]} if os.environ.get("NOTES_EN", "").strip() else {}),
             "pub_date": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
