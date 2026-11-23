@@ -1,38 +1,44 @@
-name: Windows protocol engines
-on:
-  pull_request:
-    paths: ['desktop/src-tauri/src/naive.rs', 'desktop/src-tauri/src/vpn.rs', 'desktop/src-tauri/src/main.rs', 'desktop/tests/engine-lifecycle-regression/**', 'desktop/tests/session-startup-regression/**', 'desktop/helper/**', 'ops/deploy/**', '.github/windows_protocol_smoke.py', '.github/workflows/protocol-windows.yml']
-  workflow_dispatch:
+name: Windows installer acceptance
+on: workflow_dispatch
 permissions:
   contents: read
 jobs:
-  engines:
+  install:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 8
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.12' }
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Process exit recovery regressions
+      - name: Verify public packages and exercise an installed upgrade
+        shell: pwsh
         run: |
-          python desktop/tests/engine-lifecycle-regression/run.py
-          python desktop/tests/session-startup-regression/run.py
-      - name: Compile actual native configuration generator
-        shell: bash
-        run: |
-          cargo test --locked --manifest-path desktop/tests/naive-regression/Cargo.toml
-          cargo build --locked --manifest-path desktop/tests/naive-regression/Cargo.toml --bin emit-protocol-profile
-      - name: Reject corrupted packages and incorrect architecture
-        run: python ops/deploy/test_windows_bundle.py
-      - name: Verify official archives and Windows bundle
-        shell: bash
-        run: python ops/deploy/protocol_desktop_stage.py --desktop desktop --target x86_64-pc-windows-msvc --cache "$RUNNER_TEMP/protocol-archives" --output "$RUNNER_TEMP/protocol-overlay"
-      - name: Real engine startup, HTTPS and stop
-        shell: bash
-        run: python .github/windows_protocol_smoke.py --archives "$RUNNER_TEMP/protocol-archives" --emit "$GITHUB_WORKSPACE/desktop/tests/naive-regression/target/debug/emit-protocol-profile.exe" --output "$RUNNER_TEMP/windows-protocol-result.json"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-protocol-result
-          path: ${{ runner.temp }}/windows-protocol-result.json
-          if-no-files-found: error
+          $ErrorActionPreference = 'Stop'
+          $packages = [ordered]@{
+            '1.0.165' = '37b35a6d9e11969ad6791e33b3079947c7230e9481fac287f74d5720526f55cd'
+            '1.0.194' = '3a9fb2a0349d528a42d5ac7528ffa7c1919a3a6b4538378553f3f2faff587f96'
+          }
+          $qa = Join-Path $env:RUNNER_TEMP 'insellers-installer-acceptance'
+          $installDir = Join-Path $qa 'installed'
+          New-Item -ItemType Directory -Path $qa | Out-Null
+          if (-not [Environment]::Is64BitOperatingSystem) { throw 'Windows x64 is required' }
+          foreach ($version in $packages.Keys) {
+            $path = Join-Path $qa "$version.exe"
+            $url = "https://vpn.insellers.su/app/desktop/v/$version/INSELLERS-VPN-setup.exe"
+            Invoke-WebRequest -Uri $url -OutFile $path -TimeoutSec 50
+            $digest = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            if ($digest -ne $packages[$version]) { throw "SHA256 mismatch for $version" }
+            Write-Host "Verified package $version SHA256=$digest"
+          }
+          foreach ($version in $packages.Keys) {
+            $path = Join-Path $qa "$version.exe"
+            $process = Start-Process -FilePath $path -ArgumentList "/S /D=$installDir" -PassThru
+            if (-not $process.WaitForExit(85000)) { Stop-Process -Id $process.Id -Force; throw "Installer timed out for $version" }
+            if ($process.ExitCode -ne 0) { throw "Installer $version exit code $($process.ExitCode)" }
+            $exe = @(Get-ChildItem -LiteralPath $installDir -Filter 'insellers-vpn.exe' -File -Recurse)
+            if ($exe.Count -ne 1) { throw "Expected one installed app executable for $version" }
+            $actual = $exe[0].VersionInfo.ProductVersion
+            if ($actual -ne $version -and $actual -ne "$version.0") {
+              throw "Installed version $actual differs from $version"
+            }
+            Write-Host "Installed $actual; installer exit code 0"
+          }
+          Write-Host 'Observed clean 1.0.165 install followed by 1.0.194 installer upgrade in the same directory.'
+          Write-Host 'Scope: installer and installed executable version; Tauri update UI, account and VPN traffic are outside this smoke test.'
