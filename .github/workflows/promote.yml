@@ -13,6 +13,17 @@ on:
         description: "true - опубликовать и версию СТАРШЕ текущей (откат к стабильной точке, ROLLBACK.md)"
         required: false
         default: "false"
+      platform:
+        description: "all - весь manifest; иначе выпустить только выбранную платформу"
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - windows-x86_64
+          - linux-x86_64
+          - darwin-aarch64
+          - darwin-x86_64
 concurrency: { group: desktop-publish, cancel-in-progress: false }
 jobs:
   promote:
@@ -25,11 +36,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VER: ${{ github.event.inputs.ver }}
           FORCE: ${{ github.event.inputs.force || 'false' }}
+          PLATFORM: ${{ github.event.inputs.platform || 'all' }}
         run: |
           set -euo pipefail
           echo "$VER" | grep -Eq '^1\.0\.[0-9]{1,6}$' || { echo "плохая версия"; exit 1; }
+          case "$PLATFORM" in all|windows-x86_64|linux-x86_64|darwin-aarch64|darwin-x86_64) ;; *) echo "плохая платформа"; exit 1 ;; esac
           gh api "repos/${{ github.repository }}/contents/candidates/latest-$VER.json?ref=ci-logs" --jq .content | base64 -d > latest.json
-          python3 -c "import json;d=json.load(open('latest.json'));assert d['version']=='$VER';print('ok',d['version'],list(d['platforms']))"
+          python3 - "$VER" "$PLATFORM" <<'PY'
+          import json
+          import os
+          import sys
+
+          version, platform = sys.argv[1:]
+          with open("latest.json", encoding="utf-8") as source:
+              data = json.load(source)
+          if data.get("version") != version or not isinstance(data.get("platforms"), dict):
+              raise SystemExit(f"кандидат {data.get('version')} не совпал с запрошенной версией {version}")
+          if platform != "all":
+              if platform not in data["platforms"]:
+                  raise SystemExit(f"платформы {platform} нет в manifest")
+              data["platforms"] = {platform: data["platforms"][platform]}
+              with open("latest.json.filtered", "w", encoding="utf-8") as target:
+                  json.dump(data, target, ensure_ascii=False, separators=(",", ":"))
+              os.replace("latest.json.filtered", "latest.json")
+          print("ok", data["version"], list(data["platforms"]))
+          PY
           curl -fsS --retry 3 -X POST --data-binary @latest.json -H "Content-Type: application/json" \
             -H "X-CI-Key: $KEY" "https://vpn.insellers.su/api/ci/desktop-publish$([ "$FORCE" = true ] && echo '?force=1')"
           python3 -c "import json;[print(v['url']) for v in json.load(open('latest.json'))['platforms'].values()]" | sort -u | while read u; do
