@@ -30,6 +30,7 @@ jobs:
           run_id="$DISPATCH_RUN"
           if [ -z "$run_id" ]; then
             run_id="${TAG_NAME#desktop-recover-}"
+            run_id="${run_id%-r*}"
           fi
           case "$run_id" in
             ''|*[!0-9]*) echo "Invalid build run: $run_id" >&2; exit 1 ;;
