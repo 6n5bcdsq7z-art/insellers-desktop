@@ -33,7 +33,7 @@ json!({"protocol":kind,"server":"r1.insellers.su","server_port":26443,
 }
 #[test]fn all_four_startup_routers_honor_authoritative_ad_policy(){
  let dir=std::path::Path::new("FIXTURE").to_path_buf();
- std::fs::write(dir.join("ad-hosts.json"),json!({"direct":["libtl.com","tads.me","invalid/path","vpn.insellers.su"],"tunnel":["w.tads.me"]}).to_string()).unwrap();
+ std::fs::write(dir.join("ad-hosts.json"),json!({"direct":["libtl.com","tads.me","cdn.insellers.su","invalid/path","vpn.insellers.su"],"tunnel":["w.tads.me"]}).to_string()).unwrap();
  for kind in ["naive","tuic","mieru","anytls"] {
   let p=profile(kind);let original=naive::router(&p,now_ms()).unwrap();let got=prepare(&p,dir.clone()).unwrap();
   assert!(got["outbounds"].as_array().unwrap().iter().any(|o|o["tag"]=="direct"&&o["protocol"]=="freedom"),"{kind}: no direct ad route");
@@ -69,11 +69,12 @@ policy_tests=r'''
 }
 #[test]fn invalid_domains_ips_and_own_domains_cannot_be_direct(){
  let dir=std::path::Path::new("FIXTURE").join("validation");std::fs::create_dir_all(&dir).unwrap();
- std::fs::write(dir.join("ad-hosts.json"),json!({"direct":[" LIBTL.COM ","libtl.com","127.0.0.1","bad..host","*.example.test","-bad.example","example.test-","insellers.su","bot.insellers.su",4],"tunnel":["W.TADS.ME","w.tads.me"]}).to_string()).unwrap();
- let (a,t)=ad_policy(&dir);assert_eq!(a,vec!["domain:libtl.com"]);assert_eq!(t,vec!["domain:w.tads.me"]);
+ std::fs::write(dir.join("ad-hosts.json"),json!({"direct":[" LIBTL.COM ","libtl.com","127.0.0.1","bad..host","*.example.test","-bad.example","example.test-","insellers.su","bot.insellers.su","cdn.insellers.su","vpn.insellers.su",4],"tunnel":["W.TADS.ME","w.tads.me"]}).to_string()).unwrap();
+ let (a,t)=ad_policy(&dir);assert_eq!(a,vec!["domain:libtl.com","domain:cdn.insellers.su"]);assert_eq!(t,vec!["domain:w.tads.me"]);
 }
 ''' if policy else ''
 fixture=fixture.replace('EXTRA_TESTS',policy_tests)
+routing=block(s.index('fn router_config('));assert routing.index('"domain:cdn.insellers.su"') < routing.index('"domain:insellers.su"'), 'CDN direct rule must precede broad tunnel rule'
 with tempfile.TemporaryDirectory(prefix='vpn-ad-policy-') as td:
  p=Path(td);(p/'fixture').mkdir();(p/'Cargo.toml').write_text('[package]\nname="insellers-naive-regression"\nversion="1.0.0"\nedition="2021"\n[dependencies]\nserde_json="1"\nurl="2"\n[lib]\npath="lib.rs"\n')
  shutil.copyfile(root/'tests/naive-regression/Cargo.lock',p/'Cargo.lock')

@@ -1024,6 +1024,8 @@ fn kill_child(app: &AppHandle) {
 /// 403 на скрипт (журнал: banner.nofill why=script), Kadam/OnClickA/HilltopAds - «нет рекламы»; без VPN на том же Mac - показ.
 /// gigapub.tech здесь НЕТ: его хосты на Hetzner (в РФ заблокирован) - остаётся в туннеле.
 const AD_DIRECT: &[&str] = &[
+    // Exact direct CDN origin for wrapper HTML, ad scripts and demo media.
+    "cdn.insellers.su",
     // 30.09 14:50: MyBid (баннер) - скрипт/ставки/креативы (AS39572); mbdippex/rtbrenab/zivroq на Hetzner - через туннель
     "mbidadm.com", "mbidtg.com", "cabnnr.com",
     // 30.09 15:10: AdsBitvex (ролики) - Cloudflare, только по имени
@@ -1064,7 +1066,7 @@ fn ad_policy(dir: &PathBuf) -> (Vec<String>, Vec<String>) {
                     && l.as_bytes().last().unwrap().is_ascii_alphanumeric()
                     && l.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')) { continue; }
             // Our probes/control plane must continue exercising the selected VPN.
-            if key == "direct" && (host == "insellers.su" || host.ends_with(".insellers.su")) { continue; }
+            if key == "direct" && (host == "insellers.su" || (host.ends_with(".insellers.su") && host != "cdn.insellers.su")) { continue; }
             let value = format!("domain:{host}");
             if !out.contains(&value) { out.push(value); }
         }
@@ -1097,6 +1099,7 @@ fn router_config(dir: &PathBuf) -> Value {
     let tun: Vec<String> = names("tunnel").iter().map(|d| format!("domain:{d}")).collect();
     let mut rules = vec![
         json!({"type": "field", "ip": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16"], "outboundTag": "direct"}),
+        json!({"type":"field","domain":["domain:cdn.insellers.su"],"outboundTag":"direct"}),
         json!({"type": "field", "domain": ["domain:insellers.su"], "outboundTag": "awg"}),
     ];
     if !tun.is_empty() { rules.push(json!({"type": "field", "domain": tun, "outboundTag": "awg"})); }
