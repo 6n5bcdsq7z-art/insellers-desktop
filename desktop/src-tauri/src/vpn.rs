@@ -1067,7 +1067,11 @@ fn ad_policy(dir: &PathBuf) -> (Vec<String>, Vec<String>) {
                     && l.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')) { continue; }
             // Our probes/control plane must continue exercising the selected VPN.
             if key == "direct" && (host == "insellers.su" || (host.ends_with(".insellers.su") && host != "cdn.insellers.su")) { continue; }
-            let value = format!("domain:{host}");
+            let value = if key == "direct" && host == "cdn.insellers.su" {
+                format!("full:{host}")
+            } else {
+                format!("domain:{host}")
+            };
             if !out.contains(&value) { out.push(value); }
         }
         out
@@ -1094,12 +1098,17 @@ fn router_config(dir: &PathBuf) -> Value {
     let names = |k: &str| -> Vec<String> { srv[k].as_array().map(|a| a.iter().filter_map(|x| x.as_str())
         .filter(|d| !d.is_empty() && d.len() < 100 && d.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'))
         .map(|d| d.to_string()).collect()).unwrap_or_default() };
-    let mut ads: Vec<String> = AD_DIRECT.iter().map(|d| format!("domain:{d}")).collect();
-    for d in names("direct") { let x = format!("domain:{d}"); if !ads.contains(&x) { ads.push(x); } }
+    let mut ads: Vec<String> = AD_DIRECT.iter().filter(|d| **d != "cdn.insellers.su")
+        .map(|d| format!("domain:{d}")).collect();
+    for d in names("direct") {
+        if d.eq_ignore_ascii_case("cdn.insellers.su") { continue; }
+        let x = format!("domain:{d}");
+        if !ads.contains(&x) { ads.push(x); }
+    }
     let tun: Vec<String> = names("tunnel").iter().map(|d| format!("domain:{d}")).collect();
     let mut rules = vec![
         json!({"type": "field", "ip": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16"], "outboundTag": "direct"}),
-        json!({"type":"field","domain":["domain:cdn.insellers.su"],"outboundTag":"direct"}),
+        json!({"type":"field","domain":["full:cdn.insellers.su"],"outboundTag":"direct"}),
         json!({"type": "field", "domain": ["domain:insellers.su"], "outboundTag": "awg"}),
     ];
     if !tun.is_empty() { rules.push(json!({"type": "field", "domain": tun, "outboundTag": "awg"})); }

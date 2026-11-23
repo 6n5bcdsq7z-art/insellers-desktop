@@ -42,6 +42,9 @@ json!({"protocol":kind,"server":"r1.insellers.su","server_port":26443,
   let tunnel=rules.iter().position(|r|r["outboundTag"]=="proxy"&&r["domain"].as_array().map(|a|a.contains(&json!("domain:w.tads.me"))).unwrap_or(false)).expect("missing authoritative tunnel exception");
   let direct=rules.iter().position(|r|r["outboundTag"]=="direct"&&r["domain"].as_array().map(|a|a.contains(&json!("domain:libtl.com"))).unwrap_or(false)).expect("missing direct ad route");
   assert!(tunnel<direct);assert!(!rules[direct].to_string().contains("invalid/path"));assert!(!rules[direct].to_string().contains("domain:vpn.insellers.su"));
+  let direct_hosts=rules[direct]["domain"].as_array().unwrap();
+  assert!(direct_hosts.contains(&json!("full:cdn.insellers.su")));
+  assert!(!direct_hosts.contains(&json!("domain:cdn.insellers.su")));
   assert_eq!(got["dns"],original["dns"]);assert_eq!(got["outbounds"][0],original["outbounds"][0]);
   if let Ok(bin)=std::env::var("XRAY_TEST_BIN") {
    let path=dir.join(format!("{kind}.json"));std::fs::write(&path,got.to_string()).unwrap();
@@ -69,12 +72,13 @@ policy_tests=r'''
 }
 #[test]fn invalid_domains_ips_and_own_domains_cannot_be_direct(){
  let dir=std::path::Path::new("FIXTURE").join("validation");std::fs::create_dir_all(&dir).unwrap();
- std::fs::write(dir.join("ad-hosts.json"),json!({"direct":[" LIBTL.COM ","libtl.com","127.0.0.1","bad..host","*.example.test","-bad.example","example.test-","insellers.su","bot.insellers.su","cdn.insellers.su","vpn.insellers.su",4],"tunnel":["W.TADS.ME","w.tads.me"]}).to_string()).unwrap();
- let (a,t)=ad_policy(&dir);assert_eq!(a,vec!["domain:libtl.com","domain:cdn.insellers.su"]);assert_eq!(t,vec!["domain:w.tads.me"]);
+ std::fs::write(dir.join("ad-hosts.json"),json!({"direct":[" LIBTL.COM ","libtl.com","127.0.0.1","bad..host","*.example.test","-bad.example","example.test-","insellers.su","bot.insellers.su","cdn.insellers.su","nested.cdn.insellers.su","vpn.insellers.su",4],"tunnel":["W.TADS.ME","w.tads.me"]}).to_string()).unwrap();
+ let (a,t)=ad_policy(&dir);assert_eq!(a,vec!["domain:libtl.com","full:cdn.insellers.su"]);assert_eq!(t,vec!["domain:w.tads.me"]);
 }
 ''' if policy else ''
 fixture=fixture.replace('EXTRA_TESTS',policy_tests)
-routing=block(s.index('fn router_config('));assert routing.index('"domain:cdn.insellers.su"') < routing.index('"domain:insellers.su"'), 'CDN direct rule must precede broad tunnel rule'
+routing=block(s.index('fn router_config('));assert routing.index('"full:cdn.insellers.su"') < routing.index('"domain:insellers.su"'), 'Exact CDN direct rule must precede broad tunnel rule'
+assert '"domain:cdn.insellers.su"' not in routing, 'CDN subdomains must retain the normal route'
 with tempfile.TemporaryDirectory(prefix='vpn-ad-policy-') as td:
  p=Path(td);(p/'fixture').mkdir();(p/'Cargo.toml').write_text('[package]\nname="insellers-naive-regression"\nversion="1.0.0"\nedition="2021"\n[dependencies]\nserde_json="1"\nurl="2"\n[lib]\npath="lib.rs"\n')
  shutil.copyfile(root/'tests/naive-regression/Cargo.lock',p/'Cargo.lock')
