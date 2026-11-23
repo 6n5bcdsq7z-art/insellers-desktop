@@ -23,10 +23,15 @@ def validate():
     if not re.fullmatch('[1-9][0-9]{0,19}', value):
         raise ValueError('Invalid run ID')
     run = api('actions/runs/' + value)
-    if (run['path'] != '.github/workflows/desktop.yml' or run['head_branch'] != 'main'
-            or run['event'] != 'workflow_dispatch' or run['status'] != 'completed'
+    manual_main = run['event'] == 'workflow_dispatch' and run['head_branch'] == 'main'
+    release_tag = (run['event'] == 'push'
+                   and re.fullmatch(r'desktop-(?:v[0-9]{8}-[0-9]{6}|release-[A-Za-z0-9._-]+)',
+                                    run['head_branch'] or '') is not None)
+    if (run['path'] != '.github/workflows/desktop.yml'
+            or not (manual_main or release_tag)
+            or run['status'] != 'completed'
             or run['head_repository']['full_name'] != os.environ['GITHUB_REPOSITORY']):
-        raise ValueError('Expected a completed original main workflow')
+        raise ValueError('Expected a completed original main or release-tag workflow')
     jobs = api('actions/runs/' + value + '/jobs?per_page=100')['jobs']
     builds = [j for j in jobs if j['name'].startswith('build (')]
     if len(builds) != 3 or any(j['conclusion'] != 'success' for j in builds):

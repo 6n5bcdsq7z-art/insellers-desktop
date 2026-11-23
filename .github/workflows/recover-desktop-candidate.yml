@@ -1,5 +1,8 @@
 name: Recover a desktop candidate
 on:
+  push:
+    tags:
+      - "desktop-recover-*"
   workflow_dispatch:
     inputs:
       run_id:
@@ -18,20 +21,32 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve original build run
+        env:
+          DISPATCH_RUN: ${{ inputs.run_id }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          run_id="$DISPATCH_RUN"
+          if [ -z "$run_id" ]; then
+            run_id="${TAG_NAME#desktop-recover-}"
+          fi
+          case "$run_id" in
+            ''|*[!0-9]*) echo "Invalid build run: $run_id" >&2; exit 1 ;;
+          esac
+          echo "BUILD_RUN=$run_id" >> "$GITHUB_ENV"
       - name: Validate original build and reservation
         env:
           GH_TOKEN: ${{ github.token }}
-          BUILD_RUN: ${{ inputs.run_id }}
         run: python3 .github/recover_candidate.py validate
       - uses: actions/download-artifact@v4
         with:
-          run-id: ${{ inputs.run_id }}
+          run-id: ${{ env.BUILD_RUN }}
           github-token: ${{ github.token }}
           pattern: bundle-*
           path: artifacts
       - name: Verify signatures and restore missing files
         env:
           GH_TOKEN: ${{ github.token }}
-          BUILD_RUN: ${{ inputs.run_id }}
           DESKTOP_UPLOAD_KEY: ${{ secrets.DESKTOP_UPLOAD_KEY }}
         run: /usr/bin/python3 .github/recover_candidate.py restore

@@ -337,9 +337,15 @@ jobs:
               -H "X-CI-Key: $KEY" "https://vpn.insellers.su/api/ci/desktop-upload?name=$dst&ver=$VER" 2>&1 | tee -a ../publish.log
             cat "$response" | tee -a ../publish.log; echo | tee -a ../publish.log
           }
-          WIN=$(ls *-setup.exe 2>/dev/null | head -1); MACTGZ=$(ls *.app.tar.gz 2>/dev/null | head -1); DMG=$(ls *.dmg 2>/dev/null | head -1)
-          APPIMG=$(ls *.AppImage 2>/dev/null | head -1); DEB=$(ls *.deb 2>/dev/null | head -1)
-          MACTARSIG=$(ls *.app.tar.sig 2>/dev/null | head -1)
+          pick() {
+            find . -maxdepth 1 -type f -name "$1" -print -quit
+          }
+          # find returns status 0 even when an optional artifact is absent.
+          # Plain ls/head assignments abort under set -e/pipefail before the
+          # preflight can report which release file is missing.
+          WIN=$(pick '*-setup.exe'); MACTGZ=$(pick '*.app.tar.gz'); DMG=$(pick '*.dmg')
+          APPIMG=$(pick '*.AppImage'); DEB=$(pick '*.deb')
+          MACTARSIG=$(pick '*.app.tar.sig')
           for required in "$WIN" "$MACTGZ" "$DMG" "$APPIMG" "$DEB" "$MACTARSIG" "$WIN.sig" "$MACTGZ.sig" "$APPIMG.sig"; do
             [[ -n "$required" && -s "$required" ]] || { echo "Missing required release artifact"; exit 1; }
           done
@@ -356,6 +362,9 @@ jobs:
           rm -f "$RUNNER_TEMP/INSELLERS-VPN.app.tar"
           # Save PIDs at launch. A fast failure may already be absent from jobs -p.
           pids=()
+          # Preserve per-file upload diagnostics even if one upload exits early
+          # or a later manifest/provenance step fails.
+          trap 'cat ../up*.log >> ../publish.log 2>/dev/null || true' EXIT
           up "$WIN" "INSELLERS-VPN-setup.exe" > ../up1.log 2>&1 & pids+=("$!")
           up "$DMG" "INSELLERS-VPN.dmg" > ../up2.log 2>&1 & pids+=("$!")
           up "$MACTGZ" "INSELLERS-VPN-mac.app.tar.gz" > ../up3.log 2>&1 & pids+=("$!")
