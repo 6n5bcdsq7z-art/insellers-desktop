@@ -34,6 +34,10 @@ on:
         required: false
         default: "candidate"
   # расписание GitHub (cron) ни разу не сработало - ночную сборку запускает таймер Hetzner insellers-desktop-nightly (04:15 UTC)
+  push:
+    tags:
+      - "desktop-v*"
+      - "desktop-release-*"
 
 # новая сборка отменяет ещё идущую старую (публикация при этом строго по очереди)
 concurrency:
@@ -68,7 +72,7 @@ jobs:
             gh api -X PUT "repos/${{ github.repository }}/contents/$record" --input "$RUNNER_TEMP/release-reservation.json" >/dev/null
           done
           echo "version=$VER" >> "$GITHUB_OUTPUT"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ -n "$(git log --since='25 hours ago' --format=%h -- desktop)" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "push" ] || [ -n "$(git log --since='25 hours ago' --format=%h -- desktop)" ]; then
             echo build=true >> "$GITHUB_OUTPUT"; else echo build=false >> "$GITHUB_OUTPUT"; echo "desktop/ не менялась - сборки нет"; fi
 
   build:
@@ -182,19 +186,19 @@ jobs:
           fi
           chmod +x "$out"/ins-helper-* "$out"/sing-box-*; ls -la "$out"
       - name: Stage pinned protocol engines in candidate
-        if: inputs.protocol_engines
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.protocol_engines }}
         env:
-          REQUESTED_STAGE: ${{ inputs.stage }}
+          REQUESTED_STAGE: ${{ github.event.inputs.stage || (startsWith(github.ref_name, 'desktop-release-') && 'all' || 'candidate') }}
         run: |
           set -euo pipefail
-          test "$REQUESTED_STAGE" = candidate
+          case "$REQUESTED_STAGE" in candidate|all) ;; *) echo "Unsupported release stage: $REQUESTED_STAGE"; exit 1 ;; esac
           target=x86_64-unknown-linux-gnu
           if [ "$RUNNER_OS" = macOS ]; then target=universal-apple-darwin; fi
           if [ "$RUNNER_OS" = Windows ]; then target=x86_64-pc-windows-msvc; fi
           python3 ../ops/deploy/protocol_desktop_stage.py --desktop . --target "$target" --cache "$RUNNER_TEMP/protocol-archives" --output "$RUNNER_TEMP/protocol-bundle"
           echo "PROTOCOL_CONFIG=$RUNNER_TEMP/protocol-bundle/all/protocols.tauri.json" >> "$GITHUB_ENV"
       - name: Verify the actual Pegas executable version
-        if: inputs.protocol_engines
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.protocol_engines }}
         run: |
           set -euo pipefail
           case "$RUNNER_OS" in
@@ -319,7 +323,7 @@ jobs:
           KEY: ${{ secrets.DESKTOP_UPLOAD_KEY }}
           NOTES: ${{ github.event.inputs.notes }}
           NOTES_EN: ${{ github.event.inputs.notes_en }}
-          STAGE: ${{ github.event.inputs.stage || 'candidate' }}
+          STAGE: ${{ github.event.inputs.stage || (startsWith(github.ref_name, 'desktop-release-') && 'all' || 'candidate') }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -339,6 +343,17 @@ jobs:
           for required in "$WIN" "$MACTGZ" "$DMG" "$APPIMG" "$DEB" "$MACTARSIG" "$WIN.sig" "$MACTGZ.sig" "$APPIMG.sig"; do
             [[ -n "$required" && -s "$required" ]] || { echo "Missing required release artifact"; exit 1; }
           done
+          verify() {
+            python3 "$GITHUB_WORKSPACE/ops/deploy/verify_tauri_signature.py" \
+              --config "$GITHUB_WORKSPACE/desktop/src-tauri/tauri.conf.json" \
+              --file "$1" --signature "$2"
+          }
+          verify "$WIN" "$WIN.sig"
+          verify "$MACTGZ" "$MACTGZ.sig"
+          verify "$APPIMG" "$APPIMG.sig"
+          gunzip -c "$MACTGZ" > "$RUNNER_TEMP/INSELLERS-VPN.app.tar"
+          verify "$RUNNER_TEMP/INSELLERS-VPN.app.tar" "$MACTARSIG"
+          rm -f "$RUNNER_TEMP/INSELLERS-VPN.app.tar"
           # Save PIDs at launch. A fast failure may already be absent from jobs -p.
           pids=()
           up "$WIN" "INSELLERS-VPN-setup.exe" > ../up1.log 2>&1 & pids+=("$!")
