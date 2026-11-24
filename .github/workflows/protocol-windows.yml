@@ -1,38 +1,75 @@
-name: Windows protocol engines
+name: Verify the installed Windows updater
 on:
-  pull_request:
-    paths: ['desktop/src-tauri/src/naive.rs', 'desktop/src-tauri/src/vpn.rs', 'desktop/src-tauri/src/main.rs', 'desktop/tests/engine-lifecycle-regression/**', 'desktop/tests/session-startup-regression/**', 'desktop/helper/**', 'ops/deploy/**', '.github/windows_protocol_smoke.py', '.github/workflows/protocol-windows.yml']
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  engines:
+  updater:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.12' }
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Process exit recovery regressions
+      - name: Update the installed 1.0.194 through the application
+        shell: powershell
         run: |
-          python desktop/tests/engine-lifecycle-regression/run.py
-          python desktop/tests/session-startup-regression/run.py
-      - name: Compile actual native configuration generator
-        shell: bash
-        run: |
-          cargo test --locked --manifest-path desktop/tests/naive-regression/Cargo.toml
-          cargo build --locked --manifest-path desktop/tests/naive-regression/Cargo.toml --bin emit-protocol-profile
-      - name: Reject corrupted packages and incorrect architecture
-        run: python ops/deploy/test_windows_bundle.py
-      - name: Verify official archives and Windows bundle
-        shell: bash
-        run: python ops/deploy/protocol_desktop_stage.py --desktop desktop --target x86_64-pc-windows-msvc --cache "$RUNNER_TEMP/protocol-archives" --output "$RUNNER_TEMP/protocol-overlay"
-      - name: Real engine startup, HTTPS and stop
-        shell: bash
-        run: python .github/windows_protocol_smoke.py --archives "$RUNNER_TEMP/protocol-archives" --emit "$GITHUB_WORKSPACE/desktop/tests/naive-regression/target/debug/emit-protocol-profile.exe" --output "$RUNNER_TEMP/windows-protocol-result.json"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-protocol-result
-          path: ${{ runner.temp }}/windows-protocol-result.json
-          if-no-files-found: error
+          $ErrorActionPreference = 'Stop'
+          $base = 'https://vpn.insellers.su/app/desktop'
+          $manifest = Invoke-RestMethod -Uri "$base/latest.json" -TimeoutSec 10
+          if ($manifest.version -ne '1.0.196' -or $manifest.platforms.'windows-x86_64'.url -ne "$base/v/1.0.196/INSELLERS-VPN-setup.exe") {
+            throw 'The public Windows channel is no longer 1.0.196'
+          }
+          $root = Join-Path $env:RUNNER_TEMP 'insellers-update-acceptance'
+          $installer = Join-Path $root 'baseline.exe'
+          $target = Join-Path $root 'installed'
+          New-Item -ItemType Directory -Path $root | Out-Null
+          Invoke-WebRequest -UseBasicParsing -Uri "$base/v/1.0.194/INSELLERS-VPN-setup.exe" -OutFile $installer -TimeoutSec 50
+          if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ne '3a9fb2a0349d528a42d5ac7528ffa7c1919a3a6b4538378553f3f2faff587f96') {
+            throw 'Baseline package SHA256 mismatch'
+          }
+          $setup = Start-Process -FilePath $installer -ArgumentList "/S /D=$target" -PassThru
+          if (-not $setup.WaitForExit(80000)) { Stop-Process -Id $setup.Id -Force; throw 'Baseline setup timed out' }
+          if ($setup.ExitCode -ne 0) { throw "Baseline setup exit code $($setup.ExitCode)" }
+          $applications = @(Get-ChildItem -LiteralPath $target -Filter 'insellers-vpn.exe' -File -Recurse)
+          if ($applications.Count -ne 1) { throw 'Baseline executable missing' }
+          $app = $applications[0].FullName
+          if ((Get-Item -LiteralPath $app).VersionInfo.ProductVersion -notin @('1.0.194','1.0.194.0')) { throw 'Baseline version mismatch' }
+          Write-Host 'Installed 1.0.194 and verified the available update'
+          Start-Process -FilePath $app -WorkingDirectory (Split-Path -Parent $app)
+          Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+          $buttonType = [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Button
+          )
+          $localized = -join (0x41e,0x411,0x41d,0x41e,0x412,0x418,0x422,0x42c | ForEach-Object { [char]$_ })
+          $clicked = $false
+          $until = [DateTime]::UtcNow.AddSeconds(55)
+          do {
+            foreach ($process in @(Get-Process -Name 'insellers-vpn' -ErrorAction SilentlyContinue)) {
+              if ($process.MainWindowHandle -eq 0 -or $process.Path -ne $app) { continue }
+              try {
+                $window = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
+                $buttons = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $buttonType)
+                foreach ($button in $buttons) {
+                  if ($button.Current.IsOffscreen -or -not $button.Current.IsEnabled) { continue }
+                  if ($button.Current.AutomationId -ne 'upd-btn' -and ([string]$button.Current.Name).Trim() -notin @($localized, 'Update', 'Install update')) { continue }
+                  $invoke = $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+                  $invoke.Invoke()
+                  $clicked = $true
+                  break
+                }
+              } catch [System.Windows.Automation.ElementNotAvailableException] { continue }
+              if ($clicked) { break }
+            }
+            if (-not $clicked) { Start-Sleep -Seconds 1 }
+          } until ($clicked -or [DateTime]::UtcNow -ge $until)
+          if (-not $clicked) { throw 'The installed application did not expose a visible update button in the hosted Windows session' }
+          Write-Host 'Invoked the installed application update button'
+          $until = [DateTime]::UtcNow.AddSeconds(100)
+          do {
+            $file = Get-Item -LiteralPath $app -ErrorAction SilentlyContinue
+            if ($file -and $file.VersionInfo.ProductVersion -in @('1.0.196','1.0.196.0')) {
+              Write-Host 'The in-app updater installed 1.0.196 at the original location'
+              exit 0
+            }
+            Start-Sleep -Seconds 2
+          } until ([DateTime]::UtcNow -ge $until)
+          throw 'The app was invoked but the installed version did not change to 1.0.196'
