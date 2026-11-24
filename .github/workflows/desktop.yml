@@ -311,6 +311,9 @@ jobs:
     concurrency: { group: desktop-publish, cancel-in-progress: false }   # публикации строго по очереди
     timeout-minutes: 45
     steps:
+      # The artifact archive contains binaries and signatures. The verifier comes from this commit.
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
       - name: Номер версии (1.0.(100 + номер запуска) - новее 1.0.36 из основного репо)
         env:
           RELEASE_VERSION: ${{ needs.changes.outputs.version }}
